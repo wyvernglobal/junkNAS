@@ -73,7 +73,7 @@ detect_source_dir() {
   clone_target="${temp_root}/junkNAS"
 
   log "cloning junkNAS from ${JUNKNAS_REPO_URL} into ${clone_target}"
-  git clone --depth 1 "$JUNKNAS_REPO_URL" "$clone_target"
+  git clone https://github.com/wyvernglobal/junkNAS.git "$clone_target"
   AUTO_CLONE_ROOT="$temp_root"
   SOURCE_DIR_WAS_AUTO=1
 
