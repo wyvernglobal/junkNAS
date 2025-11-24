@@ -45,7 +45,7 @@ You can build your own personal "cloud" using Raspberry Pis, laptops, servers, a
 
 You can bootstrap Podman + junkNAS with:
 
-curl -fsSL https://raw.githubusercontent.com/wyvernglobal/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wyvernglobal/junkNAS/scripts/install-junknas.sh | bash
 
 This will:
 1. Install rootless Podman (if missing).
