@@ -1,6 +1,6 @@
-
 use axum::{
     extract::State,
+    http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
@@ -37,6 +37,7 @@ pub struct NodeState {
     // NAT + Mesh metadata (optional until fully populated)
     pub mesh_endpoint: Option<String>,
     pub mesh_public_key: Option<String>,
+    pub mesh_private_key: Option<String>,
     pub mesh_score: Option<f32>,
     pub mesh_nat_type: Option<String>,
 }
@@ -45,7 +46,7 @@ pub struct NodeState {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MeshPeer {
     pub node_id: String,
-    pub endpoint: String,     // "ip:port"
+    pub endpoint: String, // "ip:port"
     pub public_key: String,
     pub score: f32,
     pub nat_type: Option<String>, // e.g. FullCone / Symmetric
@@ -56,6 +57,14 @@ pub struct MeshPeer {
 pub struct MeshInfo {
     pub peers: Vec<MeshPeer>,
     pub gateway: Option<String>,
+}
+
+/// WireGuard identity managed by dashboard.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WireGuardKeyPair {
+    pub node_id: String,
+    pub public_key: String,
+    pub private_key: String,
 }
 
 /// What agents send during heartbeat.
@@ -78,6 +87,8 @@ pub struct HeartbeatRequest {
 pub struct HeartbeatResponse {
     pub desired_allocation_bytes: u64,
     pub eject: bool,
+    pub mesh_public_key: Option<String>,
+    pub mesh_private_key: Option<String>,
 }
 /// Shared controller state across API handlers.
 #[derive(Default, Debug)]
@@ -86,6 +97,9 @@ pub struct ControllerState {
     pub desired_allocations: HashMap<String, u64>,
     pub eject_flags: HashMap<String, bool>,
     pub mesh_peers: HashMap<String, MeshPeer>,
+
+    /// Optional WireGuard keypairs managed via dashboard.
+    pub wg_keys: HashMap<String, WireGuardKeyPair>,
 
     /// Filesystem entries, keyed by absolute path.
     pub fs_entries: HashMap<String, fs::FsEntry>,
@@ -100,6 +114,7 @@ impl Default for ControllerState {
             desired_allocations: HashMap::new(),
             eject_flags: HashMap::new(),
             mesh_peers: HashMap::new(),
+            wg_keys: HashMap::new(),
             fs_entries: HashMap::new(),
         };
 
@@ -120,8 +135,6 @@ impl Default for ControllerState {
     }
 }
 
-
-
 pub type SharedState = Arc<Mutex<ControllerState>>;
 
 // -----------------------------------------------------------------------------
@@ -140,15 +153,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Build API routes
     let app = Router::new()
-    	.route("/api/nodes", get(list_nodes))
-   	.route("/api/agents/heartbeat", post(heartbeat))
-    	.route("/api/mesh", get(mesh_info))
-    // NEW: filesystem metadata API
-   	.route("/api/fs/lookup", get(fs::lookup))
-    	.route("/api/fs/list", get(fs::list))
-    	.route("/api/fs/put", post(fs::put))
-   	.route("/api/fs/delete", axum::routing::delete(fs::delete))
-    	.with_state(state);
+        .route("/api/nodes", get(list_nodes))
+        .route("/api/agents/heartbeat", post(heartbeat))
+        .route("/api/mesh", get(mesh_info))
+        .route("/api/mesh/keys", get(list_wg_keys).post(upsert_wg_keys))
+        // NEW: filesystem metadata API
+        .route("/api/fs/lookup", get(fs::lookup))
+        .route("/api/fs/list", get(fs::list))
+        .route("/api/fs/create", post(fs::create))
+        .route("/api/fs/update-size", post(fs::update_size))
+        .route("/api/fs/update-chunks", post(fs::update_chunks))
+        .route("/api/fs/delete", axum::routing::delete(fs::delete))
+        .with_state(state);
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     info!("junkNAS Controller listening on {}", addr);
@@ -178,6 +194,13 @@ async fn list_nodes(State(state): State<SharedState>) -> Json<Vec<NodeState>> {
             node.mesh_score = Some(peer.score);
             node.mesh_nat_type = peer.nat_type.clone();
         }
+
+        if let Some(kp) = st.wg_keys.get(&node.node_id) {
+            if node.mesh_public_key.is_none() {
+                node.mesh_public_key = Some(kp.public_key.clone());
+            }
+            node.mesh_private_key = Some(kp.private_key.clone());
+        }
     }
 
     Json(nodes)
@@ -192,6 +215,7 @@ async fn heartbeat(
     let mut st = state.lock().unwrap();
 
     // Update node record
+    let keypair = st.wg_keys.get(&body.node_id);
     st.nodes.insert(
         body.node_id.clone(),
         NodeState {
@@ -200,16 +224,22 @@ async fn heartbeat(
             nickname: body.nickname.clone(),
             drives: body.drives.clone(),
             mesh_endpoint: body.mesh_endpoint.clone(),
-            mesh_public_key: body.mesh_public_key.clone(),
+            mesh_public_key: body
+                .mesh_public_key
+                .clone()
+                .or_else(|| keypair.map(|k| k.public_key.clone())),
+            mesh_private_key: keypair.map(|k| k.private_key.clone()),
             mesh_score: body.mesh_score,
             mesh_nat_type: body.mesh_nat_type.clone(),
         },
     );
 
     // Update mesh peer record
-    if let (Some(endpoint), Some(pk), Some(score)) =
-        (body.mesh_endpoint.clone(), body.mesh_public_key.clone(), body.mesh_score)
-    {
+    if let (Some(endpoint), Some(pk), Some(score)) = (
+        body.mesh_endpoint.clone(),
+        body.mesh_public_key.clone(),
+        body.mesh_score,
+    ) {
         st.mesh_peers.insert(
             body.node_id.clone(),
             MeshPeer {
@@ -229,15 +259,12 @@ async fn heartbeat(
         .cloned()
         .unwrap_or(1_073_741_824); // 1 GiB
 
-    let eject = st
-        .eject_flags
-        .get(&body.node_id)
-        .cloned()
-        .unwrap_or(false);
-
+    let eject = st.eject_flags.get(&body.node_id).cloned().unwrap_or(false);
     Json(HeartbeatResponse {
         desired_allocation_bytes: alloc,
         eject,
+        mesh_public_key: keypair.map(|k| k.public_key.clone()),
+        mesh_private_key: keypair.map(|k| k.private_key.clone()),
     })
 }
 
@@ -247,13 +274,62 @@ async fn heartbeat(
 ///   - Gateway selection
 async fn mesh_info(State(state): State<SharedState>) -> Json<MeshInfo> {
     let st = state.lock().unwrap();
-    let peers: Vec<MeshPeer> = st.mesh_peers.values().cloned().collect();
+    let mut peers: Vec<MeshPeer> = st.mesh_peers.values().cloned().collect();
+
+    // Ensure peers derived from dashboard-managed keys are also exposed.
+    for (node_id, keys) in &st.wg_keys {
+        if peers.iter().any(|p| p.node_id == *node_id) {
+            continue;
+        }
+
+        if let Some(node) = st.nodes.get(node_id) {
+            if let Some(endpoint) = &node.mesh_endpoint {
+                peers.push(MeshPeer {
+                    node_id: node_id.clone(),
+                    endpoint: endpoint.clone(),
+                    public_key: keys.public_key.clone(),
+                    score: node.mesh_score.unwrap_or(0.0),
+                    nat_type: node.mesh_nat_type.clone(),
+                });
+            }
+        }
+    }
 
     // Elect gateway by highest score
     let gateway = peers
         .iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|p| p.node_id.clone());
 
     Json(MeshInfo { peers, gateway })
+}
+
+/// POST /api/mesh/keys
+/// Dashboard stores or updates WireGuard keys per node.
+async fn upsert_wg_keys(
+    State(state): State<SharedState>,
+    Json(body): Json<WireGuardKeyPair>,
+) -> StatusCode {
+    let mut st = state.lock().unwrap();
+    st.wg_keys.insert(body.node_id.clone(), body.clone());
+
+    // Update node record for dashboard convenience
+    if let Some(node) = st.nodes.get_mut(&body.node_id) {
+        node.mesh_public_key = Some(body.public_key.clone());
+        node.mesh_private_key = Some(body.private_key.clone());
+    }
+
+    StatusCode::NO_CONTENT
+}
+
+/// GET /api/mesh/keys
+/// Dashboard can retrieve all configured WireGuard identities.
+async fn list_wg_keys(State(state): State<SharedState>) -> Json<Vec<WireGuardKeyPair>> {
+    let st = state.lock().unwrap();
+    let keys: Vec<WireGuardKeyPair> = st.wg_keys.values().cloned().collect();
+    Json(keys)
 }
