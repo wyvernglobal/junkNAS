@@ -5,15 +5,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m junknas
-USER junknas
 
 WORKDIR /home/junknas
 
 # Static files
-COPY static/ /srv/junknas-dashboard/
+COPY --chown=junknas:junknas static/ /srv/junknas-dashboard/
 # Entrypoint script
-COPY init-dashboard.sh /usr/local/bin/init-dashboard.sh
-RUN chmod +x /usr/local/bin/init-dashboard.sh
+COPY --chown=root:root init-dashboard.sh /usr/local/bin/init-dashboard.sh
+RUN chmod 755 /usr/local/bin/init-dashboard.sh
+
+USER junknas
 
 ENV DASHBOARD_PORT=80
 
