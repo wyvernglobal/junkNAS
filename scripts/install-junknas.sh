@@ -69,12 +69,11 @@ detect_source_dir() {
 
   require_cmd git
 
-  temp_root="$(mktemp -d 2>/dev/null || mktemp -d -t junknas)"
-  clone_target="${temp_root}/junkNAS"
+  clone_target="./junkNAS"
 
   log "cloning junkNAS from ${JUNKNAS_REPO_URL} into ${clone_target}"
-  git clone https://github.com/wyvernglobal/junkNAS.git "$clone_target"
-  AUTO_CLONE_ROOT="$temp_root"
+  git clone https://github.com/wyvernglobal/junkNAS.git
+  AUTO_CLONE_ROOT="./junkNAS"
   SOURCE_DIR_WAS_AUTO=1
 
   echo "$clone_target"
