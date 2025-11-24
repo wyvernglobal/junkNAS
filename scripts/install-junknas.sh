@@ -28,7 +28,7 @@ ORIGINAL_PWD="$(pwd)"
 JUNKNAS_YAML_URL="${JUNKNAS_YAML_URL:-}"
 JUNKNAS_YAML_PATH="${JUNKNAS_YAML_PATH:-./junknas.yaml}"
 # Root directory containing dockerfiles/deploy manifests.
-JUNKNAS_SOURCE_DIR="${JUNKNAS_SOURCE_DIR:-}"
+JUNKNAS_SOURCE_DIR="./junkNAS"
 # Repo to clone when sourcing junkNAS automatically.
 JUNKNAS_REPO_URL="https://github.com/wyvernglobal/junkNAS.git"
 # Whether to keep the source checkout after installation; set to 1 to preserve.
