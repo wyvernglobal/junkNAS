@@ -19,7 +19,7 @@ set -eu
 # Environment overrides:
 #   JUNKNAS_YAML_URL   - URL to junknas.yaml (if not using local file)
 #   JUNKNAS_YAML_PATH  - Local path to junknas.yaml (default ./junknas.yaml)
-#   JUNKNAS_SOURCE_DIR - Where Dockerfiles/manifests live when building locally (default pwd)
+#   JUNKNAS_SOURCE_DIR - Where Dockerfiles/manifests live when building locally
 #   JUNKNAS_REPO_URL   - Repo URL to clone when sourcing junkNAS automatically
 # ------------------------------------------------------------
 
@@ -27,11 +27,8 @@ ORIGINAL_PWD="$(pwd)"
 
 JUNKNAS_YAML_URL="${JUNKNAS_YAML_URL:-}"
 JUNKNAS_YAML_PATH="${JUNKNAS_YAML_PATH:-./junknas.yaml}"
-# Root directory containing dockerfiles/deploy manifests.
-JUNKNAS_SOURCE_DIR=./junkNAS
-# Repo to clone when sourcing junkNAS automatically.
+JUNKNAS_SOURCE_DIR="${JUNKNAS_SOURCE_DIR:-}"
 JUNKNAS_REPO_URL="https://github.com/wyvernglobal/junkNAS.git"
-# Whether to keep the source checkout after installation; set to 1 to preserve.
 JUNKNAS_KEEP_SOURCE="${JUNKNAS_KEEP_SOURCE:-0}"
 SOURCE_DIR_WAS_AUTO=0
 AUTO_CLONE_ROOT=""
@@ -56,48 +53,44 @@ resolve_path() {
   esac
 }
 
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    fail "$1 not found in PATH"
+  fi
+}
+
 detect_source_dir() {
   if [ -n "$JUNKNAS_SOURCE_DIR" ]; then
     resolved_dir="$(resolve_path "$JUNKNAS_SOURCE_DIR")"
     if [ ! -d "$resolved_dir" ]; then
       fail "JUNKNAS_SOURCE_DIR does not exist: ${resolved_dir}"
     fi
-
     echo "$resolved_dir"
     return
   fi
 
   require_cmd git
 
-  clone_target=./junkNAS
+  clone_target="./junkNAS"
 
   log "cloning junkNAS from ${JUNKNAS_REPO_URL} into ${clone_target}"
-  git clone https://github.com/wyvernglobal/junkNAS.git
-  AUTO_CLONE_ROOT=./junkNAS
+  git clone "$JUNKNAS_REPO_URL" "$clone_target"
+  AUTO_CLONE_ROOT="$clone_target"
   SOURCE_DIR_WAS_AUTO=1
 
   echo "$clone_target"
 }
 
 cleanup_source_dir() {
-  # Only remove a checkout that lives directly under the current directory and was auto-detected.
   if [ "$JUNKNAS_KEEP_SOURCE" = "1" ]; then
     return
   fi
-
   if [ "$SOURCE_DIR_WAS_AUTO" != "1" ]; then
     return
   fi
-
   if [ -n "$AUTO_CLONE_ROOT" ] && [ -d "$AUTO_CLONE_ROOT" ]; then
     log "removing source checkout at ${AUTO_CLONE_ROOT} to save space"
     rm -rf "$AUTO_CLONE_ROOT"
-  fi
-}
-
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    fail "$1 not found in PATH"
   fi
 }
 
@@ -250,7 +243,6 @@ spec:
       targetPort: 80
   type: ClusterIP
 ---
-# Rootless-safe agent deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -276,24 +268,27 @@ spec:
 EOF
 }
 
+# ------------------------------------------------------------
+# FIXED SECTION — source directory is now auto-detected
+# ------------------------------------------------------------
 log "junkNAS installer (rootless)"
 
-# Normalize the YAML path before changing directories.
 JUNKNAS_YAML_PATH="$(resolve_path "$JUNKNAS_YAML_PATH")"
 
 require_cmd curl
 ensure_podman
 
-# Resolve source directory by cloning the repo when not provided explicitly.
-JUNKNAS_SOURCE_DIR=./junkNAS
-log "using source directory ./junkNAS"
-cd ./junkNAS
+log "resolving junkNAS source directory"
+JUNKNAS_SOURCE_DIR="$(detect_source_dir)"
+log "using source directory ${JUNKNAS_SOURCE_DIR}"
+cd "$JUNKNAS_SOURCE_DIR"
 
 if [ "$(id -u)" -eq 0 ]; then
   log "warning: running as root; podman is rootless-friendly, consider running as an unprivileged user"
 fi
 
-# Fetch YAML if a URL is provided
+# ------------------------------------------------------------
+
 if [ -n "$JUNKNAS_YAML_URL" ]; then
   log "downloading junknas.yaml from ${JUNKNAS_YAML_URL}"
   curl -fsSL "$JUNKNAS_YAML_URL" -o "$JUNKNAS_YAML_PATH"
@@ -311,18 +306,15 @@ else
   log "using existing manifest at $JUNKNAS_YAML_PATH"
 fi
 
-# Build container images locally so podman kube play can use them even without registry access.
 build_image ghcr.io/junknas/controller:latest "$JUNKNAS_SOURCE_DIR/docker/controller.Dockerfile"
 build_image ghcr.io/junknas/dashboard:latest "$JUNKNAS_SOURCE_DIR/docker/dashboard.Dockerfile"
 build_image ghcr.io/junknas/agent:latest "$JUNKNAS_SOURCE_DIR/docker/agent.Dockerfile"
 
-# Return to the original directory before cleaning up the clone.
 cd "$ORIGINAL_PWD"
 cleanup_source_dir
 
 log "applying junkNAS stack via podman kube play"
 
-# podman kube play runs Kubernetes-style YAML rootlessly.
 podman kube play "$JUNKNAS_YAML_PATH"
 
 log "done."
