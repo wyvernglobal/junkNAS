@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: junknas
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-controller
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-controller
+  template:
+    metadata:
+      labels:
+        app: junknas-controller
+    spec:
+      containers:
+        - name: controller
+          image: ghcr.io/junknas/controller:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: junknas-controller
+  namespace: junknas
+spec:
+  selector:
+    app: junknas-controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-dashboard
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-dashboard
+  template:
+    metadata:
+      labels:
+        app: junknas-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: ghcr.io/junknas/dashboard:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JUNKNAS_API_URL
+              value: "http://junknas-controller.junknas.svc.cluster.local/api"
+          ports:
+            - name: http
+              containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: junknas-dashboard
+  namespace: junknas
+spec:
+  selector:
+    app: junknas-dashboard
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+---
+# Rootless-safe agent deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-agent
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-agent
+  template:
+    metadata:
+      labels:
+        app: junknas-agent
+    spec:
+      containers:
+        - name: agent
+          image: ghcr.io/junknas/agent:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JUNKNAS_CONTROLLER_URL
+              value: "http://junknas-controller.junknas.svc.cluster.local/api"

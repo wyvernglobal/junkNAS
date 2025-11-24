@@ -1,0 +1,21 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      busybox-static python3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m junknas
+USER junknas
+
+WORKDIR /home/junknas
+
+# Static files
+COPY static/ /srv/junknas-dashboard/
+# Entrypoint script
+COPY init-dashboard.sh /usr/local/bin/init-dashboard.sh
+RUN chmod +x /usr/local/bin/init-dashboard.sh
+
+ENV DASHBOARD_PORT=80
+
+EXPOSE 80
+ENTRYPOINT ["/usr/local/bin/init-dashboard.sh"]

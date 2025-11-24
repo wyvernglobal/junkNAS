@@ -1,0 +1,259 @@
+
+use axum::{
+    extract::State,
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
+use tracing::{info, Level};
+use tracing_subscriber::FmtSubscriber;
+mod fs;
+// -----------------------------------------------------------------------------
+// Data Structures
+// -----------------------------------------------------------------------------
+
+/// Per-drive info sent by agent.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DriveState {
+    pub id: String,
+    pub path: String,
+    pub used_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+/// Node info stored by controller and returned to dashboard.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NodeState {
+    pub node_id: String,
+    pub hostname: String,
+    pub nickname: String,
+    pub drives: Vec<DriveState>,
+
+    // NAT + Mesh metadata (optional until fully populated)
+    pub mesh_endpoint: Option<String>,
+    pub mesh_public_key: Option<String>,
+    pub mesh_score: Option<f32>,
+    pub mesh_nat_type: Option<String>,
+}
+
+/// Mesh peer info stored separately per node.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MeshPeer {
+    pub node_id: String,
+    pub endpoint: String,     // "ip:port"
+    pub public_key: String,
+    pub score: f32,
+    pub nat_type: Option<String>, // e.g. FullCone / Symmetric
+}
+
+/// Mesh state returned to agents.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MeshInfo {
+    pub peers: Vec<MeshPeer>,
+    pub gateway: Option<String>,
+}
+
+/// What agents send during heartbeat.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HeartbeatRequest {
+    pub node_id: String,
+    pub hostname: String,
+    pub nickname: String,
+    pub drives: Vec<DriveState>,
+
+    // Mesh metadata
+    pub mesh_endpoint: Option<String>,
+    pub mesh_public_key: Option<String>,
+    pub mesh_score: Option<f32>,
+    pub mesh_nat_type: Option<String>,
+}
+
+/// Controller’s reply to heartbeat.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HeartbeatResponse {
+    pub desired_allocation_bytes: u64,
+    pub eject: bool,
+}
+/// Shared controller state across API handlers.
+#[derive(Default, Debug)]
+pub struct ControllerState {
+    pub nodes: HashMap<String, NodeState>,
+    pub desired_allocations: HashMap<String, u64>,
+    pub eject_flags: HashMap<String, bool>,
+    pub mesh_peers: HashMap<String, MeshPeer>,
+
+    /// Filesystem entries, keyed by absolute path.
+    pub fs_entries: HashMap<String, fs::FsEntry>,
+}
+
+impl Default for ControllerState {
+    fn default() -> Self {
+        use fs::{FsEntry, FsNodeType};
+
+        let mut s = ControllerState {
+            nodes: HashMap::new(),
+            desired_allocations: HashMap::new(),
+            eject_flags: HashMap::new(),
+            mesh_peers: HashMap::new(),
+            fs_entries: HashMap::new(),
+        };
+
+        // Create root directory entry.
+        let root = FsEntry {
+            path: "/".into(),
+            node_type: FsNodeType::Directory,
+            size: 0,
+            mode: 0o755,
+            mtime: 0,
+            ctime: 0,
+            chunks: Vec::new(),
+            children: Vec::new(),
+        };
+
+        s.fs_entries.insert("/".into(), root);
+        s
+    }
+}
+
+
+
+pub type SharedState = Arc<Mutex<ControllerState>>;
+
+// -----------------------------------------------------------------------------
+// Main entry
+// -----------------------------------------------------------------------------
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Pretty logging
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    let state: SharedState = Arc::new(Mutex::new(ControllerState::default()));
+
+    // Build API routes
+    let app = Router::new()
+    	.route("/api/nodes", get(list_nodes))
+   	.route("/api/agents/heartbeat", post(heartbeat))
+    	.route("/api/mesh", get(mesh_info))
+    // NEW: filesystem metadata API
+   	.route("/api/fs/lookup", get(fs::lookup))
+    	.route("/api/fs/list", get(fs::list))
+    	.route("/api/fs/put", post(fs::put))
+   	.route("/api/fs/delete", axum::routing::delete(fs::delete))
+    	.with_state(state);
+
+    let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+    info!("junkNAS Controller listening on {}", addr);
+
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// API Handlers
+// -----------------------------------------------------------------------------
+
+/// GET /api/nodes
+/// Dashboard uses this to show all nodes.
+async fn list_nodes(State(state): State<SharedState>) -> Json<Vec<NodeState>> {
+    let st = state.lock().unwrap();
+    let mut nodes: Vec<NodeState> = st.nodes.values().cloned().collect();
+
+    // Fill in NAT/mesh fields from mesh_peers if missing.
+    for node in nodes.iter_mut() {
+        if let Some(peer) = st.mesh_peers.get(&node.node_id) {
+            node.mesh_endpoint = Some(peer.endpoint.clone());
+            node.mesh_public_key = Some(peer.public_key.clone());
+            node.mesh_score = Some(peer.score);
+            node.mesh_nat_type = peer.nat_type.clone();
+        }
+    }
+
+    Json(nodes)
+}
+
+/// POST /api/agents/heartbeat
+/// Agents send storage info + NAT info here.
+async fn heartbeat(
+    State(state): State<SharedState>,
+    Json(body): Json<HeartbeatRequest>,
+) -> Json<HeartbeatResponse> {
+    let mut st = state.lock().unwrap();
+
+    // Update node record
+    st.nodes.insert(
+        body.node_id.clone(),
+        NodeState {
+            node_id: body.node_id.clone(),
+            hostname: body.hostname.clone(),
+            nickname: body.nickname.clone(),
+            drives: body.drives.clone(),
+            mesh_endpoint: body.mesh_endpoint.clone(),
+            mesh_public_key: body.mesh_public_key.clone(),
+            mesh_score: body.mesh_score,
+            mesh_nat_type: body.mesh_nat_type.clone(),
+        },
+    );
+
+    // Update mesh peer record
+    if let (Some(endpoint), Some(pk), Some(score)) =
+        (body.mesh_endpoint.clone(), body.mesh_public_key.clone(), body.mesh_score)
+    {
+        st.mesh_peers.insert(
+            body.node_id.clone(),
+            MeshPeer {
+                node_id: body.node_id.clone(),
+                endpoint,
+                public_key: pk,
+                score,
+                nat_type: body.mesh_nat_type.clone(),
+            },
+        );
+    }
+
+    // Default desired state
+    let alloc = st
+        .desired_allocations
+        .get(&body.node_id)
+        .cloned()
+        .unwrap_or(1_073_741_824); // 1 GiB
+
+    let eject = st
+        .eject_flags
+        .get(&body.node_id)
+        .cloned()
+        .unwrap_or(false);
+
+    Json(HeartbeatResponse {
+        desired_allocation_bytes: alloc,
+        eject,
+    })
+}
+
+/// GET /api/mesh
+/// Agents call this to get:
+///   - All mesh peers
+///   - Gateway selection
+async fn mesh_info(State(state): State<SharedState>) -> Json<MeshInfo> {
+    let st = state.lock().unwrap();
+    let peers: Vec<MeshPeer> = st.mesh_peers.values().cloned().collect();
+
+    // Elect gateway by highest score
+    let gateway = peers
+        .iter()
+        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|p| p.node_id.clone());
+
+    Json(MeshInfo { peers, gateway })
+}

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>junkNAS Dashboard</title>
+<style>
+    body {
+        font-family: Arial, sans-serif;
+        background: #111;
+        color: #eee;
+        margin: 20px;
+    }
+    h1, h2 {
+        margin: 0;
+        padding: 0;
+    }
+    #subtitle {
+        color: #aaa;
+        margin-bottom: 1rem;
+    }
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        margin-top: 1rem;
+        background: #1b1b1b;
+    }
+    th, td {
+        border: 1px solid #333;
+        padding: 8px;
+    }
+    th {
+        background: #222;
+    }
+    tr:nth-child(even) {
+        background: #181818;
+    }
+    button {
+        background: #444;
+        border: 1px solid #666;
+        color: #eee;
+        padding: 4px 8px;
+        cursor: pointer;
+    }
+    button:hover {
+        background: #555;
+    }
+    pre {
+        white-space: pre-wrap;
+    }
+</style>
+</head>
+<body>
+
+<h1 id="title">junkNAS</h1>
+<div id="subtitle">Loading…</div>
+
+<table id="nodes-table">
+    <thead>
+        <tr>
+            <th>Node ID</th>
+            <th>Hostname</th>
+            <th>Nickname</th>
+            <th>NAT Type</th>
+            <th>Mesh Endpoint</th>
+            <th>Mesh Score</th>
+            <th>Drives</th>
+            <th>Total Used</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody id="nodes-body"></tbody>
+</table>
+
+<div id="nat-map" style="margin-top:2rem; font-size:1rem;"></div>
+
+<script>
+let config = null;
+let readonly = false;
+
+function fmtBytes(b) {
+    const u = ["B","KB","MB","GB","TB"];
+    let i = 0;
+    let v = b;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toFixed(1) + " " + u[i];
+}
+
+async function loadConfig() {
+    const res = await fetch("config.json");
+    config = await res.json();
+    readonly = !!config.readonly;
+    document.getElementById("title").innerText = config.clusterName || "junkNAS";
+    document.getElementById("subtitle").innerText =
+        `API: ${config.apiBaseUrl} · Poll ${config.pollIntervalSeconds}s`;
+}
+
+async function fetchNodes() {
+    const res = await fetch(config.apiBaseUrl + "/nodes");
+    const nodes = await res.json();
+    renderNodes(nodes);
+    renderNatMap(nodes);
+}
+
+function renderNodes(nodes) {
+    const tbody = document.getElementById("nodes-body");
+    tbody.innerHTML = "";
+
+    nodes.forEach(node => {
+        const tr = document.createElement("tr");
+
+        const drivesText = (node.drives || [])
+            .map(d => `${d.id}: ${fmtBytes(d.used_bytes)} / ${fmtBytes(d.allocated_bytes)}`)
+            .join("\n");
+
+        const totalUsed = (node.drives || [])
+            .reduce((sum, d) => sum + d.used_bytes, 0);
+
+        tr.innerHTML = `
+            <td>${node.node_id}</td>
+            <td>${node.hostname}</td>
+            <td>${node.nickname}</td>
+            <td>${node.mesh_nat_type || "unknown"}</td>
+            <td>${node.mesh_endpoint || "n/a"}</td>
+            <td>${node.mesh_score != null ? node.mesh_score.toFixed(3) : "n/a"}</td>
+            <td><pre>${drivesText}</pre></td>
+            <td>${fmtBytes(totalUsed)}</td>
+            <td class="actions"></td>
+        `;
+
+        const td = tr.querySelector(".actions");
+
+        if (readonly) {
+            td.innerText = "readonly";
+        } else {
+            const btnAlloc = document.createElement("button");
+            btnAlloc.innerText = "+1GB";
+            btnAlloc.onclick = () => alert("TODO: allocate 1GB for " + node.node_id);
+
+            const btnEject = document.createElement("button");
+            btnEject.innerText = "Eject";
+            btnEject.style.marginLeft = "6px";
+            btnEject.onclick = () => alert("TODO: eject " + node.node_id);
+
+            td.appendChild(btnAlloc);
+            td.appendChild(btnEject);
+        }
+
+        tbody.appendChild(tr);
+    });
+}
+
+function renderNatMap(nodes) {
+    const mapDiv = document.getElementById("nat-map");
+    let html = "<h2>NAT Map</h2>";
+    if (nodes.length === 0) {
+        html += "No nodes.";
+    } else {
+        html += nodes.map(n => {
+            return `${n.node_id} → NAT=${n.mesh_nat_type || "unknown"}, score=${n.mesh_score != null ? n.mesh_score.toFixed(3) : "n/a"}`;
+        }).join("<br/>");
+    }
+    mapDiv.innerHTML = html;
+}
+
+(async function main() {
+    await loadConfig();
+    await fetchNodes();
+    setInterval(fetchNodes, (config.pollIntervalSeconds || 5) * 1000);
+})();
+</script>
+
+</body>
+</html>
