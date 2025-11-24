@@ -53,8 +53,7 @@ detect_pkg_manager() {
     echo ""
   fi
 }
-git clone https://github.com/wyvernglobal/junkNAS.git
-cd junkNAS
+
 install_podman() {
   pmgr=$(detect_pkg_manager)
   if [ -z "$pmgr" ]; then
@@ -96,6 +95,8 @@ ensure_podman() {
 }
 
 build_image() {
+  git clone https://github.com/wyvernglobal/junkNAS.git
+  cd junkNAS
   name="$1"
   dockerfile="$2"
 
