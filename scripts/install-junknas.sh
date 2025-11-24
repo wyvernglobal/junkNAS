@@ -19,6 +19,7 @@ set -eu
 # Environment overrides:
 #   JUNKNAS_YAML_URL   - URL to junknas.yaml (if not using local file)
 #   JUNKNAS_YAML_PATH  - Local path to junknas.yaml (default ./junknas.yaml)
+#   JUNKNAS_SOURCE_DIR - Where Dockerfiles/manifests live when building locally (default pwd)
 # ------------------------------------------------------------
 
 JUNKNAS_YAML_URL="${JUNKNAS_YAML_URL:-}"
@@ -105,6 +106,117 @@ build_image() {
   podman build -f "$dockerfile" -t "$name" "$JUNKNAS_SOURCE_DIR"
 }
 
+generate_default_yaml() {
+  log "generating default junknas.yaml at ${JUNKNAS_YAML_PATH}"
+  mkdir -p "$(dirname "$JUNKNAS_YAML_PATH")"
+  cat >"$JUNKNAS_YAML_PATH" <<'EOF'
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: junknas
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-controller
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-controller
+  template:
+    metadata:
+      labels:
+        app: junknas-controller
+    spec:
+      containers:
+        - name: controller
+          image: ghcr.io/junknas/controller:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: junknas-controller
+  namespace: junknas
+spec:
+  selector:
+    app: junknas-controller
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-dashboard
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-dashboard
+  template:
+    metadata:
+      labels:
+        app: junknas-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: ghcr.io/junknas/dashboard:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JUNKNAS_API_URL
+              value: "http://junknas-controller.junknas.svc.cluster.local/api"
+          ports:
+            - name: http
+              containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: junknas-dashboard
+  namespace: junknas
+spec:
+  selector:
+    app: junknas-dashboard
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  type: ClusterIP
+---
+# Rootless-safe agent deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-agent
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-agent
+  template:
+    metadata:
+      labels:
+        app: junknas-agent
+    spec:
+      containers:
+        - name: agent
+          image: ghcr.io/junknas/agent:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JUNKNAS_CONTROLLER_URL
+              value: "http://junknas-controller.junknas.svc.cluster.local/api"
+EOF
+}
+
 log "junkNAS installer (rootless)"
 
 require_cmd curl
@@ -121,7 +233,15 @@ if [ -n "$JUNKNAS_YAML_URL" ]; then
 fi
 
 if [ ! -f "$JUNKNAS_YAML_PATH" ]; then
-  fail "junknas.yaml not found at $JUNKNAS_YAML_PATH"
+  if [ -f "$JUNKNAS_SOURCE_DIR/deploy/junknas.yaml" ]; then
+    log "using repo manifest ${JUNKNAS_SOURCE_DIR}/deploy/junknas.yaml"
+    mkdir -p "$(dirname "$JUNKNAS_YAML_PATH")"
+    cp "$JUNKNAS_SOURCE_DIR/deploy/junknas.yaml" "$JUNKNAS_YAML_PATH"
+  else
+    generate_default_yaml
+  fi
+else
+  log "using existing manifest at $JUNKNAS_YAML_PATH"
 fi
 
 # Build container images locally so podman kube play can use them even without registry access.
