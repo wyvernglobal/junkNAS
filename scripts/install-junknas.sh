@@ -33,7 +33,7 @@ JUNKNAS_SOURCE_DIR=./junkNAS
 JUNKNAS_REPO_URL="https://github.com/wyvernglobal/junkNAS.git"
 # Whether to keep the source checkout after installation; set to 1 to preserve.
 JUNKNAS_KEEP_SOURCE="${JUNKNAS_KEEP_SOURCE:-0}"
-SOURCE_DIR_WAS_AUTO=1
+SOURCE_DIR_WAS_AUTO=0
 AUTO_CLONE_ROOT=""
 
 log() {
