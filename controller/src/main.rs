@@ -10,6 +10,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
+use tokio::net::TcpListener;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 mod fs;
@@ -91,7 +92,7 @@ pub struct HeartbeatResponse {
     pub mesh_private_key: Option<String>,
 }
 /// Shared controller state across API handlers.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct ControllerState {
     pub nodes: HashMap<String, NodeState>,
     pub desired_allocations: HashMap<String, u64>,
@@ -169,9 +170,9 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     info!("junkNAS Controller listening on {}", addr);
 
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await?;
+    let listener = TcpListener::bind(addr).await?;
+
+    axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())
 }
@@ -215,7 +216,7 @@ async fn heartbeat(
     let mut st = state.lock().unwrap();
 
     // Update node record
-    let keypair = st.wg_keys.get(&body.node_id);
+    let keypair = st.wg_keys.get(&body.node_id).cloned();
     st.nodes.insert(
         body.node_id.clone(),
         NodeState {
@@ -227,8 +228,8 @@ async fn heartbeat(
             mesh_public_key: body
                 .mesh_public_key
                 .clone()
-                .or_else(|| keypair.map(|k| k.public_key.clone())),
-            mesh_private_key: keypair.map(|k| k.private_key.clone()),
+                .or_else(|| keypair.as_ref().map(|k| k.public_key.clone())),
+            mesh_private_key: keypair.as_ref().map(|k| k.private_key.clone()),
             mesh_score: body.mesh_score,
             mesh_nat_type: body.mesh_nat_type.clone(),
         },
@@ -263,8 +264,8 @@ async fn heartbeat(
     Json(HeartbeatResponse {
         desired_allocation_bytes: alloc,
         eject,
-        mesh_public_key: keypair.map(|k| k.public_key.clone()),
-        mesh_private_key: keypair.map(|k| k.private_key.clone()),
+        mesh_public_key: keypair.as_ref().map(|k| k.public_key.clone()),
+        mesh_private_key: keypair.as_ref().map(|k| k.private_key.clone()),
     })
 }
 

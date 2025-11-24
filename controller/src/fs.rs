@@ -1,9 +1,9 @@
-
 use axum::{
     extract::{Query, State},
     http::StatusCode,
     Json,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -123,7 +123,7 @@ pub async fn create(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let now = chrono::Utc::now().timestamp() as u64;
+    let now = Utc::now().timestamp() as u64;
 
     let entry = FsEntry {
         path: req.path.clone(),
@@ -136,13 +136,11 @@ pub async fn create(
         children: Vec::new(),
     };
 
-    st.fs_entries
-        .entry(parent.clone())
-        .and_modify(|p| {
-            if !p.children.contains(&name) {
-                p.children.push(name.clone());
-            }
-        });
+    st.fs_entries.entry(parent.clone()).and_modify(|p| {
+        if !p.children.contains(&name) {
+            p.children.push(name.clone());
+        }
+    });
 
     st.fs_entries.insert(req.path.clone(), entry.clone());
 
@@ -164,14 +162,17 @@ pub async fn update_size(
     Json(req): Json<UpdateSizeRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let mut st = state.lock().unwrap();
-    let e = st.fs_entries.get_mut(&req.path).ok_or(StatusCode::NOT_FOUND)?;
+    let e = st
+        .fs_entries
+        .get_mut(&req.path)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     if e.node_type != FsNodeType::File {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     e.size = req.new_size;
-    e.mtime = chrono::Utc::now().timestamp() as u64;
+    e.mtime = Utc::now().timestamp() as u64;
     Ok(StatusCode::OK)
 }
 
@@ -190,14 +191,17 @@ pub async fn update_chunks(
     Json(req): Json<UpdateChunksRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let mut st = state.lock().unwrap();
-    let e = st.fs_entries.get_mut(&req.path).ok_or(StatusCode::NOT_FOUND)?;
+    let e = st
+        .fs_entries
+        .get_mut(&req.path)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     if e.node_type != FsNodeType::File {
         return Err(StatusCode::BAD_REQUEST);
     }
 
     e.chunks = req.chunks;
-    e.mtime = chrono::Utc::now().timestamp() as u64;
+    e.mtime = Utc::now().timestamp() as u64;
 
     Ok(StatusCode::OK)
 }
@@ -223,9 +227,7 @@ pub async fn delete(
         .entry(parent)
         .and_modify(|p| p.children.retain(|c| c != &name));
 
-    st.fs_entries
-        .remove(&q.path)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    st.fs_entries.remove(&q.path).ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
