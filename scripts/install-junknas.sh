@@ -95,8 +95,6 @@ ensure_podman() {
 }
 
 build_image() {
-  git clone https://github.com/wyvernglobal/junkNAS.git
-  cd junkNAS
   name="$1"
   dockerfile="$2"
 
@@ -223,7 +221,8 @@ log "junkNAS installer (rootless)"
 
 require_cmd curl
 ensure_podman
-
+git clone https://github.com/wyvernglobal/junkNAS.git
+cd junkNAS
 if [ "$(id -u)" -eq 0 ]; then
   log "warning: running as root; podman is rootless-friendly, consider running as an unprivileged user"
 fi
