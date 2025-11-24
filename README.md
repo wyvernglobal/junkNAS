@@ -63,7 +63,7 @@ The install script will not elevate privileges and is safe for unprivileged syst
 
 # Manual Installation
 
-git clone https://github.com/<yourrepo>/junknas.git
+git clone https://github.com/wyvernglobal/junkNAS.git
 cd junknas
 
 Build the Podman container:
