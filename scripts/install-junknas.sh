@@ -285,7 +285,7 @@ require_cmd curl
 ensure_podman
 
 # Resolve source directory by cloning the repo when not provided explicitly.
-JUNKNAS_SOURCE_DIR="$(detect_source_dir)"
+JUNKNAS_SOURCE_DIR="./junkNAS"
 log "using source directory ${JUNKNAS_SOURCE_DIR}"
 cd "$JUNKNAS_SOURCE_DIR"
 
