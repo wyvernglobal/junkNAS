@@ -285,9 +285,9 @@ require_cmd curl
 ensure_podman
 
 # Resolve source directory by cloning the repo when not provided explicitly.
-JUNKNAS_SOURCE_DIR="./junkNAS"
-log "using source directory ${JUNKNAS_SOURCE_DIR}"
-cd "$JUNKNAS_SOURCE_DIR"
+JUNKNAS_SOURCE_DIR=./junkNAS
+log "using source directory ./junkNAS"
+cd ./junkNAS
 
 if [ "$(id -u)" -eq 0 ]; then
   log "warning: running as root; podman is rootless-friendly, consider running as an unprivileged user"
