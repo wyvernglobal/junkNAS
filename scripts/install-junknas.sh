@@ -28,12 +28,12 @@ ORIGINAL_PWD="$(pwd)"
 JUNKNAS_YAML_URL="${JUNKNAS_YAML_URL:-}"
 JUNKNAS_YAML_PATH="${JUNKNAS_YAML_PATH:-./junknas.yaml}"
 # Root directory containing dockerfiles/deploy manifests.
-JUNKNAS_SOURCE_DIR="./junkNAS"
+JUNKNAS_SOURCE_DIR=./junkNAS
 # Repo to clone when sourcing junkNAS automatically.
 JUNKNAS_REPO_URL="https://github.com/wyvernglobal/junkNAS.git"
 # Whether to keep the source checkout after installation; set to 1 to preserve.
 JUNKNAS_KEEP_SOURCE="${JUNKNAS_KEEP_SOURCE:-0}"
-SOURCE_DIR_WAS_AUTO=0
+SOURCE_DIR_WAS_AUTO=1
 AUTO_CLONE_ROOT=""
 
 log() {
@@ -69,11 +69,11 @@ detect_source_dir() {
 
   require_cmd git
 
-  clone_target="./junkNAS"
+  clone_target=./junkNAS
 
   log "cloning junkNAS from ${JUNKNAS_REPO_URL} into ${clone_target}"
   git clone https://github.com/wyvernglobal/junkNAS.git
-  AUTO_CLONE_ROOT="./junkNAS"
+  AUTO_CLONE_ROOT=./junkNAS
   SOURCE_DIR_WAS_AUTO=1
 
   echo "$clone_target"
