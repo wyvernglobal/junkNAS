@@ -20,14 +20,21 @@ set -eu
 #   JUNKNAS_YAML_URL   - URL to junknas.yaml (if not using local file)
 #   JUNKNAS_YAML_PATH  - Local path to junknas.yaml (default ./junknas.yaml)
 #   JUNKNAS_SOURCE_DIR - Where Dockerfiles/manifests live when building locally (default pwd)
+#   JUNKNAS_REPO_URL   - Repo URL to clone when sourcing junkNAS automatically
 # ------------------------------------------------------------
+
+ORIGINAL_PWD="$(pwd)"
 
 JUNKNAS_YAML_URL="${JUNKNAS_YAML_URL:-}"
 JUNKNAS_YAML_PATH="${JUNKNAS_YAML_PATH:-./junknas.yaml}"
 # Root directory containing dockerfiles/deploy manifests.
 JUNKNAS_SOURCE_DIR="${JUNKNAS_SOURCE_DIR:-}"
+# Repo to clone when sourcing junkNAS automatically.
+JUNKNAS_REPO_URL="${JUNKNAS_REPO_URL:-https://github.com/junkNAS/junkNAS.git}"
 # Whether to keep the source checkout after installation; set to 1 to preserve.
 JUNKNAS_KEEP_SOURCE="${JUNKNAS_KEEP_SOURCE:-0}"
+SOURCE_DIR_WAS_AUTO=0
+AUTO_CLONE_ROOT=""
 
 log() {
   printf '[install] %s\n' "$*"
@@ -38,31 +45,42 @@ fail() {
   exit 1
 }
 
+resolve_path() {
+  case "$1" in
+    /*)
+      echo "$1"
+      ;;
+    *)
+      echo "${ORIGINAL_PWD}/$1"
+      ;;
+  esac
+}
+
 detect_source_dir() {
   if [ -n "$JUNKNAS_SOURCE_DIR" ]; then
-    echo "$JUNKNAS_SOURCE_DIR"
+    resolved_dir="$(resolve_path "$JUNKNAS_SOURCE_DIR")"
+    if [ ! -d "$resolved_dir" ]; then
+      fail "JUNKNAS_SOURCE_DIR does not exist: ${resolved_dir}"
+    fi
+
+    echo "$resolved_dir"
     return
   fi
 
-  # Prefer a ./junkNAS checkout when running from a temp directory via curl | sh.
-  if [ -d "$(pwd)/junkNAS/docker" ]; then
-    echo "$(pwd)/junkNAS"
-    return
-  fi
+  require_cmd git
 
-  # Fall back to the current directory if it already contains Dockerfiles.
-  if [ -d "$(pwd)/docker" ]; then
-    echo "$(pwd)"
-    return
-  fi
+  temp_root="$(mktemp -d 2>/dev/null || mktemp -d -t junknas)"
+  clone_target="${temp_root}/junkNAS"
 
-  fail "could not find junkNAS source directory; clone the repo or set JUNKNAS_SOURCE_DIR"
+  log "cloning junkNAS from ${JUNKNAS_REPO_URL} into ${clone_target}"
+  git clone --depth 1 "$JUNKNAS_REPO_URL" "$clone_target"
+  AUTO_CLONE_ROOT="$temp_root"
+  SOURCE_DIR_WAS_AUTO=1
+
+  echo "$clone_target"
 }
 
 cleanup_source_dir() {
-  source_dir="$1"
-  resolved_pwd="$(pwd)"
-
   # Only remove a checkout that lives directly under the current directory and was auto-detected.
   if [ "$JUNKNAS_KEEP_SOURCE" = "1" ]; then
     return
@@ -72,14 +90,10 @@ cleanup_source_dir() {
     return
   fi
 
-  case "$source_dir" in
-    "$resolved_pwd"/junkNAS)
-      if [ -d "$source_dir" ]; then
-        log "removing source checkout at ${source_dir} to save space"
-        rm -rf "$source_dir"
-      fi
-      ;;
-  esac
+  if [ -n "$AUTO_CLONE_ROOT" ] && [ -d "$AUTO_CLONE_ROOT" ]; then
+    log "removing source checkout at ${AUTO_CLONE_ROOT} to save space"
+    rm -rf "$AUTO_CLONE_ROOT"
+  fi
 }
 
 require_cmd() {
@@ -265,16 +279,16 @@ EOF
 
 log "junkNAS installer (rootless)"
 
+# Normalize the YAML path before changing directories.
+JUNKNAS_YAML_PATH="$(resolve_path "$JUNKNAS_YAML_PATH")"
+
 require_cmd curl
 ensure_podman
 
-# Resolve source directory for Dockerfiles/manifests (defaults to ./junkNAS when present).
-SOURCE_DIR_WAS_AUTO=0
-if [ -z "$JUNKNAS_SOURCE_DIR" ]; then
-  SOURCE_DIR_WAS_AUTO=1
-fi
+# Resolve source directory by cloning the repo when not provided explicitly.
 JUNKNAS_SOURCE_DIR="$(detect_source_dir)"
 log "using source directory ${JUNKNAS_SOURCE_DIR}"
+cd "$JUNKNAS_SOURCE_DIR"
 
 if [ "$(id -u)" -eq 0 ]; then
   log "warning: running as root; podman is rootless-friendly, consider running as an unprivileged user"
@@ -303,6 +317,10 @@ build_image ghcr.io/junknas/controller:latest "$JUNKNAS_SOURCE_DIR/docker/contro
 build_image ghcr.io/junknas/dashboard:latest "$JUNKNAS_SOURCE_DIR/docker/dashboard.Dockerfile"
 build_image ghcr.io/junknas/agent:latest "$JUNKNAS_SOURCE_DIR/docker/agent.Dockerfile"
 
+# Return to the original directory before cleaning up the clone.
+cd "$ORIGINAL_PWD"
+cleanup_source_dir
+
 log "applying junkNAS stack via podman kube play"
 
 # podman kube play runs Kubernetes-style YAML rootlessly.
@@ -310,6 +328,3 @@ podman kube play "$JUNKNAS_YAML_PATH"
 
 log "done."
 log "Use 'podman ps' to see controller/dashboard/agent containers."
-
-# Clean up the auto-detected checkout when running from a temporary workspace.
-cleanup_source_dir "$JUNKNAS_SOURCE_DIR"
