@@ -1,33 +1,23 @@
-
-mod nat;
+mod fs_types;
+mod fuse_daemon;
 mod mesh;
+mod nat;
 mod peers;
 mod transport;
 mod wireguard;
-mod fuse_daemon;
-mod fs_types;
 
 use anyhow::Context;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    net::SocketAddr,
-    path::PathBuf,
-    thread,
-    time::Duration,
-};
+use serde_json::json;
+use std::{fs, net::SocketAddr, path::PathBuf, thread, time::Duration};
 use walkdir::WalkDir;
 
+use crate::mesh::PeerConnection;
 use crate::nat::{
-    discover_public_endpoint,
-    compute_score,
-    measure_controller_rtt,
-    NatType,
-    ConnectivityMode,
+    compute_score, discover_public_endpoint, measure_controller_rtt, ConnectivityMode, NatType,
 };
 use crate::peers::{fetch_mesh_info, MeshInfo};
-use crate::mesh::PeerConnection;
 
 // -----------------------------------------------------------------------------
 // Data exchanged with controller
@@ -58,6 +48,8 @@ pub struct HeartbeatRequest {
 pub struct HeartbeatResponse {
     pub desired_allocation_bytes: u64,
     pub eject: bool,
+    pub mesh_public_key: Option<String>,
+    pub mesh_private_key: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -72,17 +64,15 @@ fn main() -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().collect();
         if args.len() >= 3 && args[1] == "mount" {
             let mountpoint = PathBuf::from(&args[2]);
-            let controller =
-                std::env::var("JUNKNAS_CONTROLLER_URL")
-                    .unwrap_or_else(|_| "http://junknas-controller.junknas.svc.cluster.local/api".into());
+            let controller = std::env::var("JUNKNAS_CONTROLLER_URL").unwrap_or_else(|_| {
+                "http://junknas-controller.junknas.svc.cluster.local/api".into()
+            });
 
             println!("[agent] starting FUSE daemon on {:?}", mountpoint);
 
             // run async FUSE
             let rt = tokio::runtime::Runtime::new()?;
-            return rt.block_on(async {
-                fuse_daemon::run_fuse(mountpoint, controller).await
-            });
+            return rt.block_on(async { fuse_daemon::run_fuse(mountpoint, controller).await });
         }
     }
 
@@ -90,16 +80,13 @@ fn main() -> anyhow::Result<()> {
     // Normal agent mode
     // ---------------------------------------------------------
 
-    let controller_url =
-        std::env::var("JUNKNAS_CONTROLLER_URL")
-            .unwrap_or_else(|_| "http://junknas-controller.junknas.svc.cluster.local/api".into());
+    let controller_url = std::env::var("JUNKNAS_CONTROLLER_URL")
+        .unwrap_or_else(|_| "http://junknas-controller.junknas.svc.cluster.local/api".into());
 
-    let hostname =
-        hostname::get()?.to_string_lossy().into_owned();
+    let hostname = hostname::get()?.to_string_lossy().into_owned();
     let node_id = hostname.clone();
 
-    let nickname =
-        std::env::var("JUNKNAS_NICKNAME").unwrap_or_else(|_| hostname.clone());
+    let nickname = std::env::var("JUNKNAS_NICKNAME").unwrap_or_else(|_| hostname.clone());
 
     // Local storage location
     let base_dir = dirs::data_local_dir()
@@ -112,11 +99,10 @@ fn main() -> anyhow::Result<()> {
     println!("[agent] base_dir = {:?}", base_dir);
 
     // Mesh config
-    let mesh_port: u16 =
-        std::env::var("JUNKNAS_MESH_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(42000);
+    let mesh_port: u16 = std::env::var("JUNKNAS_MESH_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(42000);
 
     // NAT discovery
     println!("[agent] NAT discovery…");
@@ -130,8 +116,8 @@ fn main() -> anyhow::Result<()> {
         Err(e) => {
             eprintln!("[agent] STUN failed: {:?}, using localhost", e);
             nat::PublicEndpoint {
-                public_addr: SocketAddr::from(([127,0,0,1], mesh_port)),
-                nat_type: NatType::Unknown
+                public_addr: SocketAddr::from(([127, 0, 0, 1], mesh_port)),
+                nat_type: NatType::Unknown,
             }
         }
     };
@@ -144,8 +130,7 @@ fn main() -> anyhow::Result<()> {
     println!("[agent] mesh score = {:.3}", mesh_score);
 
     let mesh_endpoint = public.public_addr.to_string();
-    let mesh_public_key =
-        std::env::var("JUNKNAS_MESH_PUBLIC_KEY").unwrap_or("dummy-key".into());
+    let mesh_public_key = std::env::var("JUNKNAS_MESH_PUBLIC_KEY").unwrap_or("dummy-key".into());
 
     // ---------------------------------------------------------
     // spawn mesh thread
@@ -160,11 +145,7 @@ fn main() -> anyhow::Result<()> {
 
             match fetch_mesh_info(&controller_clone) {
                 Ok(MeshInfo { peers, gateway }) => {
-                    println!(
-                        "[mesh-thread] {} peers, gateway={:?}",
-                        peers.len(),
-                        gateway
-                    );
+                    println!("[mesh-thread] {} peers, gateway={:?}", peers.len(), gateway);
 
                     // Build enriched PeerConnection entries
                     let mut conns = Vec::new();
@@ -197,11 +178,7 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    if let Err(e) = mesh::run_mesh(
-                        "dummy-private-key".into(),
-                        conns,
-                        mesh_port,
-                    ) {
+                    if let Err(e) = mesh::run_mesh("dummy-private-key".into(), conns, mesh_port) {
                         eprintln!("[mesh-thread] mesh error: {:?}", e);
                     }
                 }
@@ -300,10 +277,7 @@ fn folder_size(path: &PathBuf) -> anyhow::Result<u64> {
 // Apply controller’s desired state
 // -----------------------------------------------------------------------------
 
-fn apply_desired(
-    base_dir: &PathBuf,
-    desired: &HeartbeatResponse,
-) -> anyhow::Result<()> {
+fn apply_desired(base_dir: &PathBuf, desired: &HeartbeatResponse) -> anyhow::Result<()> {
     if desired.eject {
         println!("[agent] eject requested — clearing storage");
         if base_dir.exists() {
@@ -317,6 +291,20 @@ fn apply_desired(
         "[agent] desired allocation = {} (TODO implement allocator)",
         desired.desired_allocation_bytes
     );
+
+    if let (Some(public), Some(private)) = (&desired.mesh_public_key, &desired.mesh_private_key) {
+        let mesh_dir = base_dir.join("mesh");
+        fs::create_dir_all(&mesh_dir)?;
+
+        let key_path = mesh_dir.join("wg_keys.json");
+        let payload = json!({
+            "public_key": public,
+            "private_key": private,
+        });
+
+        fs::write(&key_path, serde_json::to_vec_pretty(&payload)?)?;
+        println!("[agent] synced WireGuard keys to {:?}", key_path);
+    }
 
     Ok(())
 }
