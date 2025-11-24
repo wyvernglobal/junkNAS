@@ -25,7 +25,9 @@ set -eu
 JUNKNAS_YAML_URL="${JUNKNAS_YAML_URL:-}"
 JUNKNAS_YAML_PATH="${JUNKNAS_YAML_PATH:-./junknas.yaml}"
 # Root directory containing dockerfiles/deploy manifests.
-JUNKNAS_SOURCE_DIR="${JUNKNAS_SOURCE_DIR:-$(pwd)}"
+JUNKNAS_SOURCE_DIR="${JUNKNAS_SOURCE_DIR:-}"
+# Whether to keep the source checkout after installation; set to 1 to preserve.
+JUNKNAS_KEEP_SOURCE="${JUNKNAS_KEEP_SOURCE:-0}"
 
 log() {
   printf '[install] %s\n' "$*"
@@ -34,6 +36,50 @@ log() {
 fail() {
   log "ERROR: $*"
   exit 1
+}
+
+detect_source_dir() {
+  if [ -n "$JUNKNAS_SOURCE_DIR" ]; then
+    echo "$JUNKNAS_SOURCE_DIR"
+    return
+  fi
+
+  # Prefer a ./junkNAS checkout when running from a temp directory via curl | sh.
+  if [ -d "$(pwd)/junkNAS/docker" ]; then
+    echo "$(pwd)/junkNAS"
+    return
+  fi
+
+  # Fall back to the current directory if it already contains Dockerfiles.
+  if [ -d "$(pwd)/docker" ]; then
+    echo "$(pwd)"
+    return
+  fi
+
+  fail "could not find junkNAS source directory; clone the repo or set JUNKNAS_SOURCE_DIR"
+}
+
+cleanup_source_dir() {
+  source_dir="$1"
+  resolved_pwd="$(pwd)"
+
+  # Only remove a checkout that lives directly under the current directory and was auto-detected.
+  if [ "$JUNKNAS_KEEP_SOURCE" = "1" ]; then
+    return
+  fi
+
+  if [ "$SOURCE_DIR_WAS_AUTO" != "1" ]; then
+    return
+  fi
+
+  case "$source_dir" in
+    "$resolved_pwd"/junkNAS)
+      if [ -d "$source_dir" ]; then
+        log "removing source checkout at ${source_dir} to save space"
+        rm -rf "$source_dir"
+      fi
+      ;;
+  esac
 }
 
 require_cmd() {
@@ -221,8 +267,15 @@ log "junkNAS installer (rootless)"
 
 require_cmd curl
 ensure_podman
-git clone https://github.com/wyvernglobal/junkNAS.git
-cd junkNAS
+
+# Resolve source directory for Dockerfiles/manifests (defaults to ./junkNAS when present).
+SOURCE_DIR_WAS_AUTO=0
+if [ -z "$JUNKNAS_SOURCE_DIR" ]; then
+  SOURCE_DIR_WAS_AUTO=1
+fi
+JUNKNAS_SOURCE_DIR="$(detect_source_dir)"
+log "using source directory ${JUNKNAS_SOURCE_DIR}"
+
 if [ "$(id -u)" -eq 0 ]; then
   log "warning: running as root; podman is rootless-friendly, consider running as an unprivileged user"
 fi
@@ -257,3 +310,6 @@ podman kube play "$JUNKNAS_YAML_PATH"
 
 log "done."
 log "Use 'podman ps' to see controller/dashboard/agent containers."
+
+# Clean up the auto-detected checkout when running from a temporary workspace.
+cleanup_source_dir "$JUNKNAS_SOURCE_DIR"
