@@ -13,8 +13,9 @@ WORKDIR /home/junknas
 COPY dashboard/static/ /srv/junknas-dashboard/
 
 # Entrypoint script to configure and serve the dashboard
-COPY dashboard/init-dashboard.sh /usr/local/bin/init-dashboard.sh
-RUN chmod +x /usr/local/bin/init-dashboard.sh
+COPY --chown=0:0 dashboard/init-dashboard.sh /usr/local/bin/init-dashboard.sh
+RUN chmod 755 /usr/local/bin/init-dashboard.sh
+
 
 ENV DASHBOARD_PORT=80
 
