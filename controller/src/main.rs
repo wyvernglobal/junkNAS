@@ -1,4 +1,3 @@
-
 use axum::{
     extract::State,
     routing::{get, post},
@@ -45,7 +44,7 @@ pub struct NodeState {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MeshPeer {
     pub node_id: String,
-    pub endpoint: String,     // "ip:port"
+    pub endpoint: String, // "ip:port"
     pub public_key: String,
     pub score: f32,
     pub nat_type: Option<String>, // e.g. FullCone / Symmetric
@@ -120,8 +119,6 @@ impl Default for ControllerState {
     }
 }
 
-
-
 pub type SharedState = Arc<Mutex<ControllerState>>;
 
 // -----------------------------------------------------------------------------
@@ -140,15 +137,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Build API routes
     let app = Router::new()
-    	.route("/api/nodes", get(list_nodes))
-   	.route("/api/agents/heartbeat", post(heartbeat))
-    	.route("/api/mesh", get(mesh_info))
-    // NEW: filesystem metadata API
-   	.route("/api/fs/lookup", get(fs::lookup))
-    	.route("/api/fs/list", get(fs::list))
-    	.route("/api/fs/put", post(fs::put))
-   	.route("/api/fs/delete", axum::routing::delete(fs::delete))
-    	.with_state(state);
+        .route("/api/nodes", get(list_nodes))
+        .route("/api/agents/heartbeat", post(heartbeat))
+        .route("/api/mesh", get(mesh_info))
+        // NEW: filesystem metadata API
+        .route("/api/fs/lookup", get(fs::lookup))
+        .route("/api/fs/list", get(fs::list))
+        .route("/api/fs/create", post(fs::create))
+        .route("/api/fs/update-size", post(fs::update_size))
+        .route("/api/fs/update-chunks", post(fs::update_chunks))
+        .route("/api/fs/delete", axum::routing::delete(fs::delete))
+        .with_state(state);
 
     let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
     info!("junkNAS Controller listening on {}", addr);
@@ -207,9 +206,11 @@ async fn heartbeat(
     );
 
     // Update mesh peer record
-    if let (Some(endpoint), Some(pk), Some(score)) =
-        (body.mesh_endpoint.clone(), body.mesh_public_key.clone(), body.mesh_score)
-    {
+    if let (Some(endpoint), Some(pk), Some(score)) = (
+        body.mesh_endpoint.clone(),
+        body.mesh_public_key.clone(),
+        body.mesh_score,
+    ) {
         st.mesh_peers.insert(
             body.node_id.clone(),
             MeshPeer {
@@ -229,11 +230,7 @@ async fn heartbeat(
         .cloned()
         .unwrap_or(1_073_741_824); // 1 GiB
 
-    let eject = st
-        .eject_flags
-        .get(&body.node_id)
-        .cloned()
-        .unwrap_or(false);
+    let eject = st.eject_flags.get(&body.node_id).cloned().unwrap_or(false);
 
     Json(HeartbeatResponse {
         desired_allocation_bytes: alloc,
@@ -252,7 +249,11 @@ async fn mesh_info(State(state): State<SharedState>) -> Json<MeshInfo> {
     // Elect gateway by highest score
     let gateway = peers
         .iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|p| p.node_id.clone());
 
     Json(MeshInfo { peers, gateway })
