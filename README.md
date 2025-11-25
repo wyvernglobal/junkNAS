@@ -81,6 +81,15 @@ another address. Only one controller should own a given junkNAS mesh—once node
 are synchronized, scale down or delete any extra controllers so a single endpoint
 remains managed by Kubernetes.
 
+Controller and agent pods will automatically run `wg-quick up` against
+`/etc/wireguard/junknas.conf` on startup when the config is mounted (for
+example via a `junknas-wireguard` Secret). Treat the controller as the
+WireGuard host and register each agent as a peer in that config so the overlay
+comes up as soon as Kubernetes schedules the pods.
+
+Agents skip any block devices whose mountpoint is marked `[SWAP]`, ensuring swap
+partitions are never used for junkNAS storage.
+
 For local testing without WireGuard, agents will probe a few sane defaults—first
 `host.containers.internal:8088`/`127.0.0.1:8088`, then `host.containers.internal:8080`/`127.0.0.1:8080`
 —before falling back to the overlay address. If `JUNKNAS_CONTROLLER_URL` is set but

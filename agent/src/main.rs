@@ -173,6 +173,63 @@ fn detect_primary_ip() -> String {
     ip
 }
 
+fn wireguard_config_path() -> PathBuf {
+    std::env::var("JUNKNAS_WG_CONF")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/wireguard/junknas.conf"))
+}
+
+fn ensure_wireguard_overlay() {
+    let cfg = wireguard_config_path();
+    if !cfg.exists() {
+        println!(
+            "[agent] no WireGuard config found at {:?}; skipping bring-up",
+            cfg
+        );
+        return;
+    }
+
+    let iface = cfg
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("junknas");
+
+    let already_up = Command::new("wg")
+        .arg("show")
+        .arg(iface)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if already_up {
+        println!("[agent] WireGuard interface {} already up", iface);
+        return;
+    }
+
+    println!(
+        "[agent] bringing up WireGuard interface {} using {:?}",
+        iface, cfg
+    );
+
+    match Command::new("wg-quick").arg("up").arg(&cfg).status() {
+        Ok(status) if status.success() => {
+            println!("[agent] WireGuard interface {} is up", iface);
+        }
+        Ok(status) => {
+            eprintln!(
+                "[agent] wg-quick up {:?} failed with status {}",
+                cfg, status
+            );
+        }
+        Err(err) => {
+            eprintln!(
+                "[agent] failed to invoke wg-quick with {:?}: {:?}",
+                cfg, err
+            );
+        }
+    }
+}
+
 fn load_agent_config(
     agent_id: &str,
     role: AgentRole,
@@ -329,6 +386,8 @@ fn main() -> anyhow::Result<()> {
 
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let role = AgentRole::from_env();
+
+    ensure_wireguard_overlay();
 
     let node_id = std::env::var("JUNKNAS_AGENT_ID").unwrap_or_else(|_| {
         if matches!(role, AgentRole::Pure) {
@@ -769,7 +828,14 @@ fn collect_lsblk_mounts() -> anyhow::Result<Vec<(String, PathBuf)>> {
         }
 
         if let (Some(mp), Some(size)) = (&dev.mountpoint, dev.size) {
-            if !mp.is_empty() && size > 0 {
+            let trimmed = mp.trim();
+            let is_swap = trimmed
+                .trim_matches(['[', ']'])
+                .eq_ignore_ascii_case("swap");
+
+            if is_swap {
+                println!("[agent] skipping swap-designated device {}", dev.name);
+            } else if !mp.is_empty() && size > 0 {
                 let id = format!("drive-{}", dev.name);
                 let data_root = PathBuf::from(mp).join("junknas");
                 let _ = fs::create_dir_all(&data_root);

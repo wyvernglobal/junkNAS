@@ -12,12 +12,13 @@ RUN cargo build -p junknas-controller --release
 
 FROM debian:bookworm-slim
 
-# Minimal runtime deps
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+# Minimal runtime deps + WireGuard tooling so the controller can host the mesh
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wireguard wireguard-tools iproute2 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root
 COPY --from=build /app/target/release/junknas-controller /usr/local/bin/junknas-controller
+COPY docker/controller-entrypoint.sh /usr/local/bin/controller-entrypoint.sh
 
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/junknas-controller"]
+ENTRYPOINT ["/usr/local/bin/controller-entrypoint.sh"]
