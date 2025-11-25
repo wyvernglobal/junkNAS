@@ -16,6 +16,16 @@ API_URL="${JUNKNAS_API_URL:-http://junknas-controller.junknas-controller.pod.loc
 CLUSTER_NAME="${JUNKNAS_CLUSTER_NAME:-junkNAS}"
 POLL_INTERVAL="${JUNKNAS_POLL_INTERVAL:-5}"
 READONLY="${JUNKNAS_READONLY:-false}"
+SAMBA_ENABLED="${JUNKNAS_SAMBA_ENABLED:-false}"
+SAMBA_PUBLIC_KEY="${JUNKNAS_SAMBA_PUBLIC_KEY:-}"
+SAMBA_ENDPOINT="${JUNKNAS_SAMBA_ENDPOINT:-}"
+SAMBA_ALLOWED_IPS="${JUNKNAS_SAMBA_ALLOWED_IPS:-10.44.0.0/16}"
+SAMBA_CLIENT_ADDRESS="${JUNKNAS_SAMBA_CLIENT_ADDRESS:-10.44.0.80/32}"
+SAMBA_DNS="${JUNKNAS_SAMBA_DNS:-1.1.1.1}"
+SAMBA_PRESHARED_KEY="${JUNKNAS_SAMBA_PRESHARED_KEY:-}"
+SAMBA_CLIENT_TEMPLATE="${JUNKNAS_SAMBA_CLIENT_TEMPLATE:-}"
+SAMBA_MESH_PUBLIC_KEY="${JUNKNAS_MESH_PUBLIC_KEY:-}"
+SAMBA_NOTE="${JUNKNAS_SAMBA_NOTE:-Keep Samba sidecar keys public-only; never ship controller private keys.}"
 
 echo "[dashboard] starting on port ${PORT}"
 echo "[dashboard] API endpoint: ${API_URL}"
@@ -32,7 +42,19 @@ cat > "$CONFIG_FILE" <<EOF
   "apiBaseUrl": "${API_URL}",
   "clusterName": "${CLUSTER_NAME}",
   "pollIntervalSeconds": ${POLL_INTERVAL},
-  "readonly": ${READONLY}
+  "readonly": ${READONLY},
+  "sambaGateway": {
+    "enabled": ${SAMBA_ENABLED},
+    "publicKey": "${SAMBA_PUBLIC_KEY}",
+    "endpoint": "${SAMBA_ENDPOINT}",
+    "allowedIps": "${SAMBA_ALLOWED_IPS}",
+    "clientAddressCidr": "${SAMBA_CLIENT_ADDRESS}",
+    "dns": "${SAMBA_DNS}",
+    "presharedKey": "${SAMBA_PRESHARED_KEY}",
+    "clientConfigTemplate": "${SAMBA_CLIENT_TEMPLATE}",
+    "meshPublicKey": "${SAMBA_MESH_PUBLIC_KEY}",
+    "note": "${SAMBA_NOTE}"
+  }
 }
 EOF
 

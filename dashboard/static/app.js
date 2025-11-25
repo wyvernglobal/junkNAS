@@ -4,6 +4,7 @@
 let config = null;
 let readonly = false;
 let lastNodes = [];
+let sambaGateway = null;
 
 const knownNodeIds = new Set(
   JSON.parse(localStorage.getItem("junknasKnownNodes") || "[]")
@@ -31,9 +32,12 @@ async function loadConfig() {
   const res = await fetch("config.json");
   config = await res.json();
   readonly = !!config.readonly;
+  sambaGateway = config.sambaGateway || null;
   document.getElementById("title").innerText = config.clusterName || "junkNAS";
   document.getElementById("subtitle").innerText =
     `API: ${config.apiBaseUrl} · Poll every ${config.pollIntervalSeconds}s`;
+
+  renderSambaCard();
 }
 
 async function fetchNodes() {
@@ -43,6 +47,72 @@ async function fetchNodes() {
   renderNodes(nodes);
   renderNatMap(nodes);
   enqueueNewNodes(nodes);
+}
+
+function renderSambaCard() {
+  const card = document.getElementById("samba-card");
+  const missing = document.getElementById("samba-missing");
+  if (!card || !missing) return;
+
+  if (!sambaGateway || !sambaGateway.enabled) {
+    card.classList.add("hidden");
+    missing.classList.remove("hidden");
+    return;
+  }
+
+  missing.classList.add("hidden");
+  card.classList.remove("hidden");
+
+  const preview = document.getElementById("samba-config-preview");
+  const meshPublic = document.getElementById("samba-mesh-public");
+  const notes = document.getElementById("samba-notes");
+
+  document.getElementById("samba-public-key").innerText =
+    sambaGateway.publicKey || "unknown";
+  document.getElementById("samba-endpoint").innerText =
+    sambaGateway.endpoint || "(no endpoint)";
+  document.getElementById("samba-allowed").innerText =
+    sambaGateway.allowedIps || "(none)";
+  document.getElementById("samba-address").innerText =
+    sambaGateway.clientAddressCidr || "(not assigned)";
+
+  meshPublic.innerText = sambaGateway.meshPublicKey || "n/a";
+  notes.innerText =
+    sambaGateway.note ||
+    "Use the peer info above when adding the Samba sidecar to the WireGuard mesh.";
+
+  preview.innerText = buildSambaClientConfig();
+
+  initSambaModal();
+}
+
+function buildSambaClientConfig() {
+  const template = (sambaGateway?.clientConfigTemplate || "").trim();
+  if (template) return template;
+
+  const lines = ["[Interface]"];
+  lines.push("PrivateKey = <generate on your device>");
+  if (sambaGateway?.clientAddressCidr) {
+    lines.push(`Address = ${sambaGateway.clientAddressCidr}`);
+  }
+  if (sambaGateway?.dns) {
+    lines.push(`DNS = ${sambaGateway.dns}`);
+  }
+  lines.push("", "[Peer]");
+  if (sambaGateway?.publicKey) {
+    lines.push(`PublicKey = ${sambaGateway.publicKey}`);
+  }
+  if (sambaGateway?.presharedKey) {
+    lines.push(`PresharedKey = ${sambaGateway.presharedKey}`);
+  }
+  if (sambaGateway?.allowedIps) {
+    lines.push(`AllowedIPs = ${sambaGateway.allowedIps}`);
+  }
+  if (sambaGateway?.endpoint) {
+    lines.push(`Endpoint = ${sambaGateway.endpoint}`);
+  }
+  lines.push("PersistentKeepalive = 25");
+  return lines.join("\n");
 }
 
 function renderNodes(nodes) {
@@ -245,6 +315,77 @@ function initMergeForm() {
 
     wgInput.value = "";
   });
+}
+
+function renderSambaQr(text) {
+  const container = document.getElementById("samba-qr");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (typeof qrcode !== "function") {
+    container.innerText = "QR generator unavailable";
+    return;
+  }
+
+  const qr = qrcode(0, "M");
+  qr.addData(text);
+  qr.make();
+  const img = document.createElement("img");
+  img.alt = "WireGuard config QR";
+  img.src = qr.createDataURL(6, 12);
+  container.appendChild(img);
+}
+
+function openSambaModal() {
+  const modal = document.getElementById("samba-modal");
+  if (!modal) return;
+
+  const cfg = buildSambaClientConfig();
+  document.getElementById("samba-config-block").innerText = cfg;
+  renderSambaQr(cfg);
+
+  modal.classList.remove("hidden");
+}
+
+function closeSambaModal() {
+  const modal = document.getElementById("samba-modal");
+  if (modal) {
+    modal.classList.add("hidden");
+  }
+}
+
+function downloadSambaConfig() {
+  const cfg = buildSambaClientConfig();
+  const blob = new Blob([cfg], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "junknas-samba.conf";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function initSambaModal() {
+  const openBtn = document.getElementById("samba-connect");
+  const closeBtn = document.getElementById("samba-close");
+  const downloadBtn = document.getElementById("samba-download");
+
+  if (openBtn && !openBtn.dataset.bound) {
+    openBtn.dataset.bound = "true";
+    openBtn.addEventListener("click", openSambaModal);
+  }
+
+  if (closeBtn && !closeBtn.dataset.bound) {
+    closeBtn.dataset.bound = "true";
+    closeBtn.addEventListener("click", closeSambaModal);
+  }
+
+  if (downloadBtn && !downloadBtn.dataset.bound) {
+    downloadBtn.dataset.bound = "true";
+    downloadBtn.addEventListener("click", downloadSambaConfig);
+  }
 }
 
 async function main() {
