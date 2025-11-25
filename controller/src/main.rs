@@ -178,6 +178,10 @@ async fn main() -> anyhow::Result<()> {
 
     let state: SharedState = Arc::new(Mutex::new(ControllerState::default()));
 
+    // Ensure the WireGuard config file exists before starting the controller.
+    let interface = wireguard::default_interface();
+    wireguard::ensure_config_file(&interface)?;
+
     // Build API routes
     let app = Router::new()
         .route("/api/nodes", get(list_nodes))

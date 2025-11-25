@@ -27,7 +27,7 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
         env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".to_string());
 
     let keypair = state.wg_keys.get(&controller_node_id)?.clone();
-    let interface = env::var("WG_INTERFACE").unwrap_or_else(|_| "wg0".to_string());
+    let interface = default_interface();
     let path = config_path(&interface);
 
     let endpoint_override = env::var("WG_ENDPOINT_OVERRIDE").ok();
@@ -118,6 +118,26 @@ pub fn write_and_reload(cfg: RenderedConfig) -> Result<()> {
     Ok(())
 }
 
+/// Ensures a WireGuard config file exists on disk before the controller starts.
+pub fn ensure_config_file(interface: &str) -> Result<PathBuf> {
+    let path = config_path(interface);
+
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        fs::write(&path, "# junkNAS WireGuard configuration\n")?;
+        info!(
+            "Created placeholder WireGuard config at {} for interface {}",
+            path.display(),
+            interface
+        );
+    }
+
+    Ok(path)
+}
+
 fn restart_interface(interface: &str) {
     // Stop interface if it exists; ignore errors so a missing interface doesn't block startup.
     if let Err(e) = Command::new("wg-quick").arg("down").arg(interface).status() {
@@ -137,6 +157,10 @@ fn config_path(interface: &str) -> PathBuf {
             .join(format!("{}.conf", interface))
             .to_path_buf()
     }
+}
+
+pub fn default_interface() -> String {
+    env::var("WG_INTERFACE").unwrap_or_else(|_| "junknas".to_string())
 }
 
 fn ip_to_cidr(ip: &str) -> String {
