@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use getrandom::getrandom;
 use serde::{Deserialize, Serialize};
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
 /// How we think we should talk to a peer.
@@ -104,7 +104,17 @@ fn stun_request(sock: &UdpSocket, stun_addr: SocketAddr) -> Result<SocketAddr> {
 
 /// Discover a public endpoint using the given STUN server.
 pub fn discover_public_endpoint(stun_server: &str, bind_port: u16) -> Result<PublicEndpoint> {
-    let stun_addr: SocketAddr = stun_server.parse()?;
+    let mut stun_addrs: Vec<SocketAddr> = stun_server
+        .to_socket_addrs()
+        .map_err(|e| anyhow!("failed to resolve STUN server {stun_server}: {e}"))?
+        .collect();
+
+    let stun_addr = stun_addrs
+        .iter()
+        .find(|addr| addr.is_ipv4())
+        .copied()
+        .or_else(|| stun_addrs.first().copied())
+        .ok_or_else(|| anyhow!("no usable STUN addresses for {stun_server}"))?;
     let sock = UdpSocket::bind(("0.0.0.0", bind_port))?;
     sock.set_nonblocking(false)?;
 
