@@ -32,7 +32,7 @@ You can build your own personal "cloud" using Raspberry Pis, laptops, servers, a
 ### Dashboard
 - Lightweight HTML dashboard served from the controller.
 - Displays cluster nodes, storage, mesh scores, chunk distribution, and online/offline status.
-- Provides a "Connect via SAMBA" flow that shows the Samba sidecar WireGuard peer, plus QR/download helpers for clients (no private keys are ever shown).
+- Provides a "Connect via SAMBA" flow that shows the Samba sidecar WireGuard peer, plus QR/download helpers for clients (no private keys are ever shown). The dashboard now generates a Samba-only WireGuard private key for the QR code and config download so the junkNAS mesh private key stays dedicated to syncing.
 
 ### Rootless by Default
 - No privileged syscalls.
@@ -57,7 +57,8 @@ This will:
 5. Install alias scripts:
    - junknas-agent
    - junknas-controller
-6. Print next-steps instructions.
+6. Launch a Samba sidecar pod (agent + Samba containers) that mounts the junkNAS filesystem, attaches to the WireGuard mesh, and exports it over the VLAN.
+7. Print next-steps instructions.
 
 The install script will not elevate privileges and is safe for unprivileged systems.
 

@@ -2,6 +2,8 @@
 
 This guide describes how to make the junkNAS filesystem available to traditional SMB/Samba clients. The simplest approach is to run a **Samba sidecar** that sits next to the controller/agent, joins the WireGuard-backed junkNAS VLAN, mounts the filesystem locally, and exports it as a Samba share so any device that joins the WireGuard network can browse the NAS. The dashboard now exposes the WireGuard peer info (public-only) for this sidecar, plus a QR code and downloadable config stub to help clients join. Private keys for junkNAS remain hidden—only peer metadata is surfaced.
 
+The one-line installer now provisions this sidecar automatically (agent + Samba containers). It mounts the junkNAS filesystem, connects to the WireGuard mesh, and publishes the share on the overlay VLAN so clients can immediately connect. The dashboard generates a Samba-only WireGuard private key when you render a QR code or download the config so the junkNAS mesh private key stays reserved for syncing.
+
 ## Prerequisites
 - A running junkNAS controller and at least one agent with data mounted at `/mnt/junknas`.
 - A host (VM, server, or laptop) that will act as the Samba gateway.
@@ -103,7 +105,7 @@ Any client that joins the same WireGuard VLAN as a peer can browse the share. Co
 - Linux: `sudo mount -t cifs //10.44.0.50/junknas /mnt/remote -o username=<username>`
 
 ### Dashboard helpers
-- Open the junkNAS dashboard and click **Connect via SAMBA**. This pops a QR code and a `junknas-samba.conf` download with the WireGuard peer details for the Samba sidecar. The `PrivateKey` line is a placeholder—generate a key on your client before using it.
+- Open the junkNAS dashboard and click **Connect via SAMBA**. This pops a QR code and a `junknas-samba.conf` download with the WireGuard peer details for the Samba sidecar. The dashboard now generates a fresh WireGuard private key for the client config, ensuring you do not reuse the junkNAS mesh private key for Samba access.
 - The dashboard also shows the sidecar’s WireGuard public key, endpoint, and allowed IPs so you can cross-check peers in the controller. It never exposes the controller or agent private keys.
 
 This approach keeps junkNAS traffic isolated on the mesh while exposing a familiar SMB interface for users and applications.

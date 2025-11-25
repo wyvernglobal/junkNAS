@@ -5,6 +5,9 @@ let config = null;
 let readonly = false;
 let lastNodes = [];
 let sambaGateway = null;
+let sambaClientPrivateKey = null;
+
+const SAMBA_CLIENT_KEY_CACHE_KEY = "junknasSambaClientKey";
 
 const knownNodeIds = new Set(
   JSON.parse(localStorage.getItem("junknasKnownNodes") || "[]")
@@ -87,11 +90,23 @@ function renderSambaCard() {
 }
 
 function buildSambaClientConfig() {
+  return buildSambaClientConfigInternal(false);
+}
+
+function buildSambaClientConfigWithPrivateKey() {
+  return buildSambaClientConfigInternal(true);
+}
+
+function buildSambaClientConfigInternal(includePrivateKey) {
   const template = (sambaGateway?.clientConfigTemplate || "").trim();
   if (template) return template;
 
   const lines = ["[Interface]"];
-  lines.push("PrivateKey = <generate on your device>");
+  if (includePrivateKey) {
+    lines.push(`PrivateKey = ${getSambaClientPrivateKey()}`);
+  } else {
+    lines.push("PrivateKey = <generate on your device>");
+  }
   if (sambaGateway?.clientAddressCidr) {
     lines.push(`Address = ${sambaGateway.clientAddressCidr}`);
   }
@@ -113,6 +128,39 @@ function buildSambaClientConfig() {
   }
   lines.push("PersistentKeepalive = 25");
   return lines.join("\n");
+}
+
+function getSambaClientPrivateKey() {
+  if (!sambaClientPrivateKey) {
+    const cached = sessionStorage.getItem(SAMBA_CLIENT_KEY_CACHE_KEY);
+    sambaClientPrivateKey = cached || generateWireGuardPrivateKey();
+
+    if (!cached) {
+      sessionStorage.setItem(SAMBA_CLIENT_KEY_CACHE_KEY, sambaClientPrivateKey);
+    }
+  }
+
+  return sambaClientPrivateKey;
+}
+
+function generateWireGuardPrivateKey() {
+  try {
+    const buf = new Uint8Array(32);
+    (crypto || window.crypto).getRandomValues(buf);
+    return base64FromBytes(buf);
+  } catch (e) {
+    console.warn("Falling back to Math.random for key generation", e);
+    let arr = [];
+    for (let i = 0; i < 32; i++) {
+      arr.push(Math.floor(Math.random() * 256));
+    }
+    return base64FromBytes(arr);
+  }
+}
+
+function base64FromBytes(bytes) {
+  const bin = Array.from(bytes, (b) => String.fromCharCode(b)).join("");
+  return btoa(bin);
 }
 
 function renderNodes(nodes) {
@@ -340,7 +388,7 @@ function openSambaModal() {
   const modal = document.getElementById("samba-modal");
   if (!modal) return;
 
-  const cfg = buildSambaClientConfig();
+  const cfg = buildSambaClientConfigWithPrivateKey();
   document.getElementById("samba-config-block").innerText = cfg;
   renderSambaQr(cfg);
 
@@ -355,7 +403,7 @@ function closeSambaModal() {
 }
 
 function downloadSambaConfig() {
-  const cfg = buildSambaClientConfig();
+  const cfg = buildSambaClientConfigWithPrivateKey();
   const blob = new Blob([cfg], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
