@@ -12,7 +12,9 @@ set -eu
 DASHBOARD_DIR="${DASHBOARD_DIR:-/srv/junknas-dashboard}"
 PORT="${DASHBOARD_PORT:-8080}"
 
-API_URL="${JUNKNAS_API_URL:-http://junknas-controller.junknas-controller.pod.local:8088/api}"
+API_PUBLIC_HOST="${JUNKNAS_API_PUBLIC_HOST:-junknas-controller.junknas-controller.pod.local}"
+API_PUBLIC_PORT="${JUNKNAS_API_PUBLIC_PORT:-8088}"
+API_URL="${JUNKNAS_API_URL:-http://${API_PUBLIC_HOST}:${API_PUBLIC_PORT}/api}"
 CLUSTER_NAME="${JUNKNAS_CLUSTER_NAME:-junkNAS}"
 POLL_INTERVAL="${JUNKNAS_POLL_INTERVAL:-5}"
 READONLY="${JUNKNAS_READONLY:-false}"

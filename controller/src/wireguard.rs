@@ -59,18 +59,20 @@ pub fn controller_endpoint(state: &ControllerState) -> Option<String> {
             return Some(ep.clone());
         }
 
-        if let (Some(ip), Some(port)) = (node.ip.as_ref(), node.mesh_port) {
+        if let Some(ip) = node.ip.as_ref() {
+            let port = node.mesh_port.unwrap_or_else(advertised_port);
             return Some(format_endpoint(ip, port));
         }
     }
 
     if let Ok(ip) = env::var("WG_ADDRESS") {
         let addr = ip.split('/').next().unwrap_or(&ip);
-        let port = env::var("WG_LISTEN_PORT")
-            .ok()
-            .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(51820);
-        return Some(format_endpoint(addr, port));
+        return Some(format_endpoint(addr, advertised_port()));
+    }
+
+    if let Ok(ip) = env::var("WG_ADDRESS_V6") {
+        let addr = ip.split('/').next().unwrap_or(&ip);
+        return Some(format_endpoint(addr, advertised_port()));
     }
 
     None
@@ -143,6 +145,9 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
         interface_addresses.push(addr_v6);
     }
 
+    interface_addresses.sort();
+    interface_addresses.dedup();
+
     let mut lines = Vec::new();
     lines.push("[Interface]".to_string());
     lines.push(format!("PrivateKey = {}", keypair.private_key));
@@ -155,12 +160,15 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
         lines.push(format!("# Endpoint override: {}", override_host));
     }
 
-    for peer in state.mesh_peers.values() {
+    let mut peers: Vec<MeshPeer> = state.mesh_peers.values().cloned().collect();
+    peers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+
+    for peer in peers {
         if peer.node_id == controller_node_id {
             continue;
         }
         let node_meta = state.nodes.get(&peer.node_id);
-        let endpoint = compute_endpoint(node_meta, peer, endpoint_override.as_deref());
+        let endpoint = compute_endpoint(node_meta, &peer, endpoint_override.as_deref());
         let allowed_ips = node_meta
             .and_then(|n| n.ip.as_ref())
             .map(|ip| ip_to_cidr(ip))
@@ -177,7 +185,10 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
         }
     }
 
-    for client in state.samba_clients.values() {
+    let mut samba_clients: Vec<_> = state.samba_clients.values().cloned().collect();
+    samba_clients.sort_by(|a, b| a.address.cmp(&b.address));
+
+    for client in samba_clients {
         lines.push(String::new());
         lines.push("[Peer]".to_string());
         lines.push(format!("PublicKey = {}", client.public_key));
@@ -296,6 +307,20 @@ fn format_endpoint(host: &str, port: u16) -> String {
     } else {
         format!("{}:{}", host, port)
     }
+}
+
+fn advertised_port() -> u16 {
+    parse_port_env("WG_ENDPOINT_PORT")
+        .or_else(|| parse_port_env("WG_EXTERNAL_PORT"))
+        .or_else(|| parse_port_env("WG_LISTEN_PORT"))
+        .unwrap_or(51820)
+}
+
+fn parse_port_env(key: &str) -> Option<u16> {
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|p| p.min(u16::MAX as u32) as u16)
 }
 
 fn split_endpoint(ep: &str) -> Option<(String, u16)> {
