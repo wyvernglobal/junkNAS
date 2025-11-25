@@ -296,6 +296,7 @@ spec:
           image: ghcr.io/junknas/controller:latest
           imagePullPolicy: IfNotPresent
           ports:
+            - containerPort: 8008
             - containerPort: 8080
 ---
 apiVersion: v1
@@ -310,58 +311,9 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: junknas-dashboard
-  namespace: junknas
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: junknas-dashboard
-  template:
-    metadata:
-      labels:
-        app: junknas-dashboard
-    spec:
-      containers:
-        - name: dashboard
-          image: ghcr.io/junknas/dashboard:latest
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: JUNKNAS_API_URL
-              value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
-            - name: JUNKNAS_SAMBA_ENABLED
-              value: "true"
-            - name: JUNKNAS_SAMBA_PUBLIC_KEY
-              value: "samba-sidecar-public-key"
-            - name: JUNKNAS_SAMBA_ENDPOINT
-              value: "junknas-samba.junknas.svc.cluster.local:51820"
-            - name: JUNKNAS_SAMBA_ALLOWED_IPS
-              value: "10.44.0.0/16"
-            - name: JUNKNAS_SAMBA_CLIENT_ADDRESS
-              value: "10.44.0.80/32"
-            - name: JUNKNAS_SAMBA_DNS
-              value: "1.1.1.1"
-            - name: JUNKNAS_SAMBA_NOTE
-              value: "Samba sidecar runs on the WireGuard VLAN; clients should use the generated key instead of cluster keys."
-          ports:
-            - containerPort: 8080
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: junknas-dashboard
-  namespace: junknas
-spec:
-  selector:
-    app: junknas-dashboard
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
+    - name: api
+      port: 8008
+      targetPort: 8008
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -383,7 +335,7 @@ spec:
           image: ghcr.io/junknas/agent:latest
           env:
             - name: JUNKNAS_CONTROLLER_URL
-              value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
+              value: "http://10.44.0.1:8008/api"  # WireGuard overlay endpoint
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -407,7 +359,7 @@ spec:
           args: ["mount", "/mnt/junknas"]
           env:
             - name: JUNKNAS_CONTROLLER_URL
-              value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
+              value: "http://10.44.0.1:8008/api"  # WireGuard overlay endpoint
           securityContext:
             privileged: true
             capabilities:
@@ -505,7 +457,6 @@ generate_wireguard_mesh_configs
 # Build container images locally
 # ------------------------------------------------------------
 build_image ghcr.io/junknas/controller:latest "$JUNKNAS_SOURCE_DIR/docker/controller.Dockerfile"
-build_image ghcr.io/junknas/dashboard:latest "$JUNKNAS_SOURCE_DIR/docker/dashboard.Dockerfile"
 build_image ghcr.io/junknas/agent:latest "$JUNKNAS_SOURCE_DIR/docker/agent.Dockerfile"
 
 # ------------------------------------------------------------

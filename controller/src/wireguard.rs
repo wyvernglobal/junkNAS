@@ -198,6 +198,18 @@ pub fn write_and_reload(cfg: RenderedConfig) -> Result<()> {
     if let Some(parent) = cfg.path.parent() {
         fs::create_dir_all(parent)?;
     }
+
+    if let Ok(existing) = fs::read_to_string(&cfg.path) {
+        if existing == cfg.contents {
+            info!(
+                "WireGuard config unchanged at {} (interface {}) — skipping restart",
+                cfg.path.display(),
+                cfg.interface
+            );
+            return Ok(());
+        }
+    }
+
     fs::write(&cfg.path, &cfg.contents)?;
 
     info!(

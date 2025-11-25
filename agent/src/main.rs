@@ -8,6 +8,9 @@ mod peers;
 mod transport;
 mod wireguard;
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use rand::rngs::OsRng;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -25,6 +28,7 @@ use std::{
     time::Duration,
 };
 use walkdir::WalkDir;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::mesh::PeerConnection;
 use crate::nat::{compute_score, discover_public_endpoint, measure_controller_rtt, NatType};
@@ -34,7 +38,7 @@ use crate::{
     nat::ConnectivityMode,
 };
 
-const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8080/api";
+const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8008/api";
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -98,12 +102,14 @@ fn choose_controller_url() -> String {
         // Preferred host-forwarded port
         "http://host.containers.internal:8088/api".to_string(),
         "http://127.0.0.1:8088/api".to_string(),
+        "http://host.containers.internal:8008/api".to_string(),
+        "http://127.0.0.1:8008/api".to_string(),
+        // Overlay defaults
+        "http://10.44.0.1:8008/api".to_string(),
+        DEFAULT_CONTROLLER_URL.to_string(),
         // Legacy port on host
         "http://host.containers.internal:8080/api".to_string(),
         "http://127.0.0.1:8080/api".to_string(),
-        // Overlay defaults
-        "http://10.44.0.1:8088/api".to_string(),
-        DEFAULT_CONTROLLER_URL.to_string(),
     ];
 
     if let Ok(url) = std::env::var("JUNKNAS_CONTROLLER_URL") {
@@ -314,6 +320,31 @@ fn persist_agent_config(cfg: &AgentConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn generate_agent_keypair() -> (String, String) {
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&secret);
+
+    let private_key = STANDARD.encode(secret.to_bytes());
+    let public_key = STANDARD.encode(public.to_bytes());
+
+    (private_key, public_key)
+}
+
+fn ensure_agent_keypair(cfg: &mut AgentConfig) -> anyhow::Result<()> {
+    if cfg.mesh_public_key.is_none() || cfg.mesh_private_key.is_none() {
+        let (private_key, public_key) = generate_agent_keypair();
+        cfg.mesh_public_key = Some(public_key);
+        cfg.mesh_private_key = Some(private_key);
+        persist_agent_config(cfg)?;
+        println!(
+            "[agent] generated WireGuard mesh keypair for {}",
+            cfg.agent_id
+        );
+    }
+
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // Data exchanged with controller
 // -----------------------------------------------------------------------------
@@ -338,6 +369,7 @@ pub struct HeartbeatRequest {
 
     pub mesh_endpoint: Option<String>,
     pub mesh_public_key: Option<String>,
+    pub mesh_private_key: Option<String>,
     pub mesh_score: Option<f32>,
     pub mesh_nat_type: Option<String>,
 }
@@ -421,6 +453,7 @@ fn main() -> anyhow::Result<()> {
         });
 
     let mut agent_config = load_agent_config(&node_id, role, preferred_port)?;
+    ensure_agent_keypair(&mut agent_config)?;
     agent_config.ip = detect_primary_ip();
     agent_config.role = role;
     persist_agent_config(&agent_config)?;
@@ -453,11 +486,14 @@ fn main() -> anyhow::Result<()> {
     println!("[agent] mesh score = {:.3}", mesh_score);
 
     let mesh_endpoint = public.public_addr.to_string();
-    let mesh_public_key = agent_config
-        .mesh_public_key
-        .clone()
-        .or_else(|| std::env::var("JUNKNAS_MESH_PUBLIC_KEY").ok())
+    let mesh_public_key = std::env::var("JUNKNAS_MESH_PUBLIC_KEY")
+        .ok()
+        .or(agent_config.mesh_public_key.clone())
         .unwrap_or_else(|| "dummy-key".into());
+    let mesh_private_key = agent_config
+        .mesh_private_key
+        .clone()
+        .unwrap_or_else(|| "dummy-private-key".into());
 
     let shutdown = Arc::new(AtomicBool::new(false));
     {
@@ -473,6 +509,7 @@ fn main() -> anyhow::Result<()> {
     let controller_clone = controller_url.clone();
     let node_id_clone = node_id.clone();
     let our_nat_type = public.nat_type.clone();
+    let mesh_private_key_clone = mesh_private_key.clone();
 
     thread::spawn(move || {
         loop {
@@ -513,7 +550,8 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    if let Err(e) = mesh::run_mesh("dummy-private-key".into(), conns, mesh_port) {
+                    if let Err(e) = mesh::run_mesh(mesh_private_key_clone.clone(), conns, mesh_port)
+                    {
                         eprintln!("[mesh-thread] mesh error: {:?}", e);
                     }
                 }
@@ -549,6 +587,7 @@ fn main() -> anyhow::Result<()> {
             drives: drives.clone(),
             mesh_endpoint: Some(mesh_endpoint.clone()),
             mesh_public_key: Some(mesh_public_key.clone()),
+            mesh_private_key: Some(mesh_private_key.clone()),
             mesh_score: Some(mesh_score),
             mesh_nat_type: Some(format!("{:?}", public.nat_type)),
         };

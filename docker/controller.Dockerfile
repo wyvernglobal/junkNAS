@@ -25,8 +25,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /root
 COPY --from=build /app/target/release/junknas-controller /usr/local/bin/junknas-controller
+COPY dashboard/static/ /srv/junknas-dashboard/
 COPY docker/controller-entrypoint.sh /usr/local/bin/controller-entrypoint.sh
 
+EXPOSE 8008
 EXPOSE 8080
 EXPOSE 445
 ENTRYPOINT ["/usr/local/bin/controller-entrypoint.sh"]

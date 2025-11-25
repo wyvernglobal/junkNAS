@@ -22,3 +22,6 @@ fuse3 = { version = "0.5", features = ["tokio-runtime"] }
 bytes = "1"
 futures-util = "0.3"
 ctrlc = "3"
+base64 = "0.22"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
