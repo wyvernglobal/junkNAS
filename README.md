@@ -59,7 +59,7 @@ This will:
 5. Install alias scripts:
    - junknas-agent
    - junknas-controller
-6. Launch a Samba sidecar pod (agent + Samba containers) that mounts the junkNAS filesystem, attaches to the WireGuard mesh, and exports it over the VLAN.
+6. Bring up Samba inside the controller container so the filesystem is exported directly from the control plane.
 7. Print next-steps instructions.
 
 The install script will not elevate privileges and is safe for unprivileged systems.
@@ -120,7 +120,7 @@ cat /mnt/junknas/example.txt
 
 # Accessing junkNAS over Samba
 
-To let traditional SMB clients browse the cluster, attach a gateway host (or run a Samba sidecar) on the WireGuard VLAN and export the mounted filesystem via Samba. The dashboard exposes public-only WireGuard metadata for the sidecar and offers a **Connect via SAMBA** button that renders a QR code and downloadable client config stub. See [docs/samba-access.md](docs/samba-access.md) for a step-by-step guide to creating the WireGuard peer, mounting the agent locally, and publishing the share without leaking junkNAS private keys.
+The controller now exposes the Samba share directly so traditional SMB clients can browse the cluster over WireGuard. Use the dashboard’s **Connect via SAMBA** button to mint a fresh peer configuration targeting the controller; the modal renders a QR code and provides a downloadable config so you can onboard clients without ever revealing the mesh private key. See [docs/samba-access.md](docs/samba-access.md) for a step-by-step guide and more advanced tuning.
 
 ---
 

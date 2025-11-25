@@ -28,15 +28,28 @@ spec:
           ports:
             - containerPort: 8080
               hostPort: 8088   # expose controller on host:8088
+            - containerPort: 445
           volumeMounts:
             - name: junknas-wireguard
               mountPath: /etc/wireguard
               readOnly: true
+            - name: junknas-share
+              mountPath: /srv/junknas-share
+          env:
+            - name: JUNKNAS_SAMBA_SHARE_DIR
+              value: "/srv/junknas-share"
+            - name: JUNKNAS_SAMBA_SHARE_NAME
+              value: "junknas"
+            - name: JUNKNAS_SAMBA_USER
+              value: "junknas"
       volumes:
         - name: junknas-wireguard
           secret:
             secretName: junknas-wireguard
             optional: true
+        - name: junknas-share
+          persistentVolumeClaim:
+            claimName: junknas-share-data
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -128,64 +141,6 @@ spec:
             secretName: junknas-wireguard
             optional: true
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: junknas-samba
-  namespace: junknas
-spec:
-  replicas: 0  # temporarily disable samba sidecar while focusing on pure agents
-  selector:
-    matchLabels:
-      app: junknas-samba
-  template:
-    metadata:
-      labels:
-        app: junknas-samba
-    spec:
-      containers:
-        - name: junknas-agent
-          image: ghcr.io/junknas/agent:latest
-          imagePullPolicy: IfNotPresent
-          args: ["mount", "/mnt/junknas"]
-          env:
-            - name: JUNKNAS_CONTROLLER_URL
-              value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
-          devices:
-            - containerPath: /dev/fuse
-              hostPath: /dev/fuse
-              permissions: "rwm"
-          securityContext:
-            privileged: true
-            capabilities:
-              add: ["SYS_ADMIN"]
-          volumeMounts:
-            - name: junknas-data
-              mountPath: /var/lib/junknas
-            - name: junknas-mnt
-              mountPath: /mnt/junknas
-        - name: samba
-          image: docker.io/dperson/samba:latest
-          imagePullPolicy: IfNotPresent
-          args: ["-s", "junknas;/srv/junknas;yes;no;yes"]
-          env:
-            - name: USER
-              value: junknas
-            - name: PASS
-              value: junknas
-          ports:
-            - containerPort: 445
-          volumeMounts:
-            - name: junknas-mnt
-              mountPath: /srv/junknas
-      volumes:
-        - name: junknas-data
-          emptyDir: {}
-        - name: junknas-mnt
-          emptyDir: {}
-
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -213,6 +168,19 @@ spec:
 
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: junknas-share-data
+  namespace: junknas
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: junknas-controller
@@ -224,6 +192,9 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
+    - name: smb
+      port: 445
+      targetPort: 445
 
 ---
 apiVersion: v1
@@ -238,17 +209,3 @@ spec:
     - name: http
       port: 8080
       targetPort: 8080
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: junknas-samba
-  namespace: junknas
-spec:
-  selector:
-    app: junknas-samba
-  ports:
-    - name: smb
-      port: 445
-      targetPort: 445
