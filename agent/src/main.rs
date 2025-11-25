@@ -20,6 +20,50 @@ use crate::peers::{fetch_mesh_info, MeshInfo};
 
 const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8080/api";
 
+fn choose_controller_url() -> String {
+    if let Ok(url) = std::env::var("JUNKNAS_CONTROLLER_URL") {
+        println!(
+            "[agent] using controller from JUNKNAS_CONTROLLER_URL={}",
+            url
+        );
+        return url;
+    }
+
+    let candidates = [
+        DEFAULT_CONTROLLER_URL.to_string(),
+        "http://host.containers.internal:8080/api".to_string(),
+        "http://host.containers.internal:8088/api".to_string(),
+        "http://127.0.0.1:8080/api".to_string(),
+        "http://127.0.0.1:8088/api".to_string(),
+    ];
+
+    for url in &candidates {
+        if controller_reachable(url) {
+            println!("[agent] using controller endpoint {}", url);
+            return url.clone();
+        }
+
+        println!("[agent] controller probe failed for {}", url);
+    }
+
+    println!(
+        "[agent] no controller endpoints reachable; falling back to {}",
+        DEFAULT_CONTROLLER_URL
+    );
+
+    DEFAULT_CONTROLLER_URL.to_string()
+}
+
+fn controller_reachable(url: &str) -> bool {
+    if let Ok(client) = Client::builder().timeout(Duration::from_secs(1)).build() {
+        if client.get(format!("{}/nodes", url)).send().is_ok() {
+            return true;
+        }
+    }
+
+    false
+}
+
 // -----------------------------------------------------------------------------
 // Data exchanged with controller
 // -----------------------------------------------------------------------------
@@ -65,8 +109,7 @@ fn main() -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().collect();
         if args.len() >= 3 && args[1] == "mount" {
             let mountpoint = PathBuf::from(&args[2]);
-            let controller = std::env::var("JUNKNAS_CONTROLLER_URL")
-                .unwrap_or_else(|_| DEFAULT_CONTROLLER_URL.to_string());
+            let controller = choose_controller_url();
 
             println!("[agent] starting FUSE daemon on {:?}", mountpoint);
 
@@ -80,8 +123,7 @@ fn main() -> anyhow::Result<()> {
     // Normal agent mode
     // ---------------------------------------------------------
 
-    let controller_url =
-        std::env::var("JUNKNAS_CONTROLLER_URL").unwrap_or_else(|_| DEFAULT_CONTROLLER_URL.into());
+    let controller_url = choose_controller_url();
 
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let node_id = hostname.clone();
