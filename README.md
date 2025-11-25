@@ -71,6 +71,14 @@ podman run -it -e JUNKNAS_MODE=controller -p 8080:8080 junknas
 
 Dashboard available at: http://localhost:8080
 
+Agents expect to talk to the controller over the WireGuard overlay so that rootless
+Podman + Kubernetes deployments can crosstalk across a full junkNAS mesh. The
+default overlay endpoint is `http://10.44.0.1:8080/api`; ensure your controller
+advertises a reachable WireGuard IP and update `JUNKNAS_CONTROLLER_URL` if you use
+another address. Only one controller should own a given junkNAS mesh—once nodes
+are synchronized, scale down or delete any extra controllers so a single endpoint
+remains managed by Kubernetes.
+
 ---
 
 # Running an Agent

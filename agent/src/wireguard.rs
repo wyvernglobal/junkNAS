@@ -49,7 +49,11 @@ impl WGTunnel {
 
     /// Send encrypted WG packet into boringtun.
     pub fn write_packet(&mut self, pkt: &[u8]) -> Result<()> {
-        let stdin = self.child.stdin.as_mut().ok_or_else(|| anyhow!("wg stdin closed"))?;
+        let stdin = self
+            .child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("wg stdin closed"))?;
 
         match stdin.write_all(pkt) {
             Ok(_) => Ok(()),

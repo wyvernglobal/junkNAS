@@ -20,6 +20,6 @@ USER junknas
 WORKDIR /home/junknas
 COPY --from=build /app/target/release/junknas-agent /usr/local/bin/junknas-agent
 
-ENV JUNKNAS_CONTROLLER_URL="http://junknas-controller.junknas.svc.cluster.local:8080/api"
+ENV JUNKNAS_CONTROLLER_URL="http://10.44.0.1:8080/api"
 
 ENTRYPOINT ["/usr/local/bin/junknas-agent"]

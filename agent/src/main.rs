@@ -18,6 +18,8 @@ use crate::mesh::PeerConnection;
 use crate::nat::{compute_score, discover_public_endpoint, measure_controller_rtt, NatType};
 use crate::peers::{fetch_mesh_info, MeshInfo};
 
+const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8080/api";
+
 // -----------------------------------------------------------------------------
 // Data exchanged with controller
 // -----------------------------------------------------------------------------
@@ -63,9 +65,8 @@ fn main() -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().collect();
         if args.len() >= 3 && args[1] == "mount" {
             let mountpoint = PathBuf::from(&args[2]);
-            let controller = std::env::var("JUNKNAS_CONTROLLER_URL").unwrap_or_else(|_| {
-                "http://junknas-controller.junknas.svc.cluster.local/api".into()
-            });
+            let controller = std::env::var("JUNKNAS_CONTROLLER_URL")
+                .unwrap_or_else(|_| DEFAULT_CONTROLLER_URL.to_string());
 
             println!("[agent] starting FUSE daemon on {:?}", mountpoint);
 
@@ -79,8 +80,8 @@ fn main() -> anyhow::Result<()> {
     // Normal agent mode
     // ---------------------------------------------------------
 
-    let controller_url = std::env::var("JUNKNAS_CONTROLLER_URL")
-        .unwrap_or_else(|_| "http://junknas-controller.junknas.svc.cluster.local/api".into());
+    let controller_url =
+        std::env::var("JUNKNAS_CONTROLLER_URL").unwrap_or_else(|_| DEFAULT_CONTROLLER_URL.into());
 
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let node_id = hostname.clone();
