@@ -19,5 +19,8 @@ WORKDIR /root
 COPY --from=build /app/target/release/junknas-agent /usr/local/bin/junknas-agent
 
 ENV JUNKNAS_CONTROLLER_URL="http://10.44.0.1:8008/api"
+ENV JUNKNAS_WG_ENDPOINT_PORT="65535"
+ENV JUNKNAS_WG_ALLOWED_IPS="fd44::/64"
+ENV JUNKNAS_WG_DNS="fd44::1"
 
 ENTRYPOINT ["/usr/local/bin/junknas-agent"]

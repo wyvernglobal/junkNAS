@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
+use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 mod fs;
@@ -202,11 +202,11 @@ impl Default for ControllerState {
                 .and_then(|v| v.parse::<u8>().ok())
                 .unwrap_or(110),
             samba_pool_prefix: std::env::var("SAMBA_CLIENT_PREFIX")
-                .unwrap_or_else(|_| "10.44.0".into()),
+                .unwrap_or_else(|_| "fd44::".into()),
             samba_client_dns: std::env::var("SAMBA_CLIENT_DNS")
-                .unwrap_or_else(|_| "1.1.1.1".into()),
+                .unwrap_or_else(|_| "fd44::1".into()),
             samba_allowed_ips: std::env::var("SAMBA_ALLOWED_IPS")
-                .unwrap_or_else(|_| "10.44.0.0/16".into()),
+                .unwrap_or_else(|_| "fd44::/64".into()),
         };
 
         // Create root directory entry.
@@ -229,7 +229,12 @@ impl Default for ControllerState {
             std::env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".into());
         let controller_ip = std::env::var("WG_ADDRESS")
             .ok()
-            .map(|v| v.split('/').next().unwrap_or(&v).to_string());
+            .map(|v| v.split('/').next().unwrap_or(&v).to_string())
+            .or_else(|| {
+                std::env::var("WG_ADDRESS_V6")
+                    .ok()
+                    .map(|v| v.split('/').next().unwrap_or(&v).to_string())
+            });
         let controller_port = std::env::var("WG_LISTEN_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok());
@@ -300,7 +305,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/fs/update-size", post(fs::update_size))
         .route("/api/fs/update-chunks", post(fs::update_chunks))
         .route("/api/fs/delete", axum::routing::delete(fs::delete))
-        .with_state(state);
+        .with_state(state)
+        .layer(CorsLayer::permissive());
 
     let dashboard_app = Router::new().fallback_service(ServeDir::new(dashboard_dir.clone()));
 
@@ -445,8 +451,21 @@ fn alloc_samba_client_address(st: &mut ControllerState) -> Option<String> {
             st.samba_next_octet + 1
         };
 
-        let addr = format!("{}.{}", st.samba_pool_prefix, octet);
-        let cidr = format!("{}/32", addr);
+        let addr = if st.samba_pool_prefix.contains(':') {
+            let mut prefix = st.samba_pool_prefix.clone();
+            if !prefix.ends_with(':') {
+                prefix.push(':');
+            }
+            format!("{}{:x}", prefix, octet)
+        } else {
+            format!("{}.{}", st.samba_pool_prefix, octet)
+        };
+
+        let cidr = if addr.contains(':') {
+            format!("{}/128", addr)
+        } else {
+            format!("{}/32", addr)
+        };
 
         if !st.samba_clients.contains_key(&cidr) {
             return Some(cidr);

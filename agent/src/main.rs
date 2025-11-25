@@ -14,6 +14,7 @@ use rand::rngs::OsRng;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
     net::{SocketAddr, UdpSocket},
@@ -79,6 +80,14 @@ struct AgentConfig {
     drives: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct WireGuardKeyPair {
+    node_id: String,
+    public_key: String,
+    #[allow(dead_code)]
+    private_key: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct LsblkOutput {
     blockdevices: Vec<LsblkBlockDevice>,
@@ -99,11 +108,11 @@ struct LsblkBlockDevice {
 
 fn choose_controller_url() -> String {
     let mut candidates = vec![
-        // Preferred host-forwarded port
-        "http://host.containers.internal:8088/api".to_string(),
-        "http://127.0.0.1:8088/api".to_string(),
+        // Preferred host-forwarded ports (dashboards typically live at 8080)
         "http://host.containers.internal:8008/api".to_string(),
         "http://127.0.0.1:8008/api".to_string(),
+        "http://host.containers.internal:8088/api".to_string(),
+        "http://127.0.0.1:8088/api".to_string(),
         // Overlay defaults
         "http://10.44.0.1:8008/api".to_string(),
         DEFAULT_CONTROLLER_URL.to_string(),
@@ -234,6 +243,126 @@ fn ensure_wireguard_overlay() {
             );
         }
     }
+}
+
+fn advertised_endpoint_port() -> u16 {
+    std::env::var("JUNKNAS_WG_ENDPOINT_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|p| p.min(u16::MAX as u32) as u16)
+        .unwrap_or(u16::MAX)
+}
+
+fn advertised_endpoint_host() -> String {
+    std::env::var("JUNKNAS_WG_ENDPOINT_HOST")
+        .unwrap_or_else(|_| "host.containers.internal".to_string())
+}
+
+fn format_endpoint(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
+fn derive_ipv6_address(agent_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(agent_id.as_bytes());
+    let bytes = hasher.finalize();
+
+    let suffix = ((bytes[0] as u16) << 8) | bytes[1] as u16;
+    format!("fd44::{:x}/64", suffix)
+}
+
+fn render_agent_wireguard_config(
+    cfg: &AgentConfig,
+    controller_public_key: &str,
+) -> anyhow::Result<String> {
+    let private_key = cfg
+        .mesh_private_key
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("agent WireGuard private key missing"))?;
+
+    let listen_port = std::env::var("JUNKNAS_WG_LISTEN_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(cfg.port);
+
+    let allowed_ips =
+        std::env::var("JUNKNAS_WG_ALLOWED_IPS").unwrap_or_else(|_| "fd44::/64".into());
+    let dns = std::env::var("JUNKNAS_WG_DNS").unwrap_or_else(|_| "fd44::1".into());
+    let address = std::env::var("JUNKNAS_WG_ADDRESS_V6")
+        .unwrap_or_else(|_| derive_ipv6_address(&cfg.agent_id));
+
+    let endpoint = std::env::var("JUNKNAS_WG_ENDPOINT")
+        .or_else(|_| std::env::var("WG_ENDPOINT_OVERRIDE"))
+        .unwrap_or_else(|_| {
+            format_endpoint(&advertised_endpoint_host(), advertised_endpoint_port())
+        });
+
+    let mut lines = vec!["[Interface]".to_string()];
+    lines.push(format!("PrivateKey = {}", private_key));
+    lines.push(format!("Address = {}", address));
+    lines.push(format!("ListenPort = {}", listen_port));
+    lines.push(format!("DNS = {}", dns));
+
+    lines.push(String::new());
+    lines.push("[Peer]".to_string());
+    lines.push(format!("PublicKey = {}", controller_public_key));
+    lines.push(format!("AllowedIPs = {}", allowed_ips));
+    lines.push(format!("Endpoint = {}", endpoint));
+    lines.push("PersistentKeepalive = 25".to_string());
+
+    Ok(lines.join("\n") + "\n")
+}
+
+fn fetch_controller_wg_public_key(
+    controller_url: &str,
+    controller_node_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let client = Client::builder().timeout(Duration::from_secs(3)).build()?;
+    let url = format!("{}/mesh/keys", controller_url.trim_end_matches('/'));
+    let resp = client.get(url).send()?;
+
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+
+    let keys = resp.json::<Vec<WireGuardKeyPair>>()?;
+    Ok(keys
+        .into_iter()
+        .find(|k| k.node_id == controller_node_id)
+        .map(|k| k.public_key))
+}
+
+fn write_wireguard_config(cfg: &AgentConfig, controller_url: &str) -> anyhow::Result<()> {
+    let controller_node_id =
+        std::env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".to_string());
+
+    let Some(controller_public_key) =
+        fetch_controller_wg_public_key(controller_url, &controller_node_id)?
+    else {
+        println!("[agent] controller WireGuard public key unavailable; skipping config render");
+        return Ok(());
+    };
+
+    let contents = render_agent_wireguard_config(cfg, &controller_public_key)?;
+    let path = wireguard_config_path();
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    if let Ok(existing) = fs::read_to_string(&path) {
+        if existing == contents {
+            return Ok(());
+        }
+    }
+
+    fs::write(&path, contents)?;
+    println!("[agent] wrote WireGuard config to {:?}", path);
+    Ok(())
 }
 
 fn load_agent_config(
@@ -419,8 +548,6 @@ fn main() -> anyhow::Result<()> {
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let role = AgentRole::from_env();
 
-    ensure_wireguard_overlay();
-
     let node_id = std::env::var("JUNKNAS_AGENT_ID").unwrap_or_else(|_| {
         if matches!(role, AgentRole::Pure) {
             hostname.clone()
@@ -459,6 +586,9 @@ fn main() -> anyhow::Result<()> {
     persist_agent_config(&agent_config)?;
 
     let mesh_port = agent_config.port;
+
+    write_wireguard_config(&agent_config, &controller_url)?;
+    ensure_wireguard_overlay();
 
     // NAT discovery
     println!("[agent] NAT discovery…");
@@ -611,6 +741,7 @@ fn main() -> anyhow::Result<()> {
                     &drives,
                     desired.mesh_public_key.clone(),
                     desired.mesh_private_key.clone(),
+                    &controller_url,
                 )?;
             } else {
                 eprintln!("[agent] heartbeat: invalid response");
@@ -991,6 +1122,7 @@ fn update_config_from_heartbeat(
     drives: &[DriveReport],
     mesh_public_key: Option<String>,
     mesh_private_key: Option<String>,
+    controller_url: &str,
 ) -> anyhow::Result<()> {
     cfg.allocated_bytes = drives.iter().map(|d| d.allocated_bytes).sum();
     cfg.drives = drives.iter().map(|d| d.id.clone()).collect();
@@ -1004,5 +1136,9 @@ fn update_config_from_heartbeat(
         cfg.mesh_private_key = Some(sk);
     }
 
-    persist_agent_config(cfg)
+    persist_agent_config(cfg)?;
+    write_wireguard_config(cfg, controller_url)?;
+    ensure_wireguard_overlay();
+
+    Ok(())
 }
