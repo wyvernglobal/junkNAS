@@ -81,6 +81,8 @@ podman run -it --device /dev/fuse --cap-add SYS_ADMIN --userns=keep-id \
 ```
 Verify that `/mnt/junknas` contains your cluster data before proceeding.
 
+> **Note:** The Samba sidecar actually runs the junkNAS FUSE client to expose the cluster data at `/mnt/junknas` before Samba shares it. On rootless Podman and kube-play deployments you must pass `--device /dev/fuse` (or run the pod in privileged mode with `/dev/fuse` mounted) or the agent will fail to start and restart in a loop.
+
 ## 3) Export the mount over Samba
 1. Add a share definition to `/etc/samba/smb.conf` (or a drop-in under `/etc/samba/smb.conf.d/`):
    ```ini
