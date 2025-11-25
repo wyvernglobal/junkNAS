@@ -69,7 +69,7 @@ The install script will not elevate privileges and is safe for unprivileged syst
 
 # Running the Controller
 
-podman run -it -e JUNKNAS_MODE=controller -p 8080:8080 junknas
+podman kube play junknas.yaml
 
 Dashboard available at: http://localhost:8080
 
@@ -115,13 +115,4 @@ To let traditional SMB clients browse the cluster, attach a gateway host (or run
 
 ---
 
-# Repository Layout
 
-junknas/
-├── agent/
-├── controller/
-├── dashboard/
-├── Dockerfile
-└── run.sh
-
----
