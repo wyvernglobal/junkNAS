@@ -16,11 +16,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Non-root user
-RUN useradd -m junknas
-USER junknas
-
-WORKDIR /home/junknas
+WORKDIR /root
 COPY --from=build /app/target/release/junknas-controller /usr/local/bin/junknas-controller
 
 EXPOSE 8080

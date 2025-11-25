@@ -14,7 +14,13 @@ use serde_json::json;
 use std::{
     fs::{self, OpenOptions},
     net::{SocketAddr, UdpSocket},
+    os::unix::fs as unix_fs,
     path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::Duration,
 };
@@ -23,6 +29,10 @@ use walkdir::WalkDir;
 use crate::mesh::PeerConnection;
 use crate::nat::{compute_score, discover_public_endpoint, measure_controller_rtt, NatType};
 use crate::peers::{fetch_mesh_info, MeshInfo};
+use crate::{
+    fs_types::{ChunkMeta, FsNodeType, ListResponse},
+    nat::ConnectivityMode,
+};
 
 const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8080/api";
 
@@ -63,6 +73,24 @@ struct AgentConfig {
     mesh_private_key: Option<String>,
     allocated_bytes: u64,
     drives: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LsblkOutput {
+    blockdevices: Vec<LsblkBlockDevice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LsblkBlockDevice {
+    name: String,
+    #[serde(default)]
+    mountpoint: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    children: Vec<LsblkBlockDevice>,
 }
 
 fn choose_controller_url() -> String {
@@ -372,6 +400,14 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("JUNKNAS_MESH_PUBLIC_KEY").ok())
         .unwrap_or_else(|| "dummy-key".into());
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = shutdown.clone();
+        ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        })?;
+    }
+
     // ---------------------------------------------------------
     // spawn mesh thread
     // ---------------------------------------------------------
@@ -437,7 +473,7 @@ fn main() -> anyhow::Result<()> {
 
     let client = Client::new();
 
-    loop {
+    while !shutdown.load(Ordering::SeqCst) {
         let drives = if matches!(role, AgentRole::Pure) {
             discover_drives(&base_dir)?
         } else {
@@ -485,8 +521,149 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[agent] controller unreachable");
         }
 
-        thread::sleep(Duration::from_secs(5));
+        for _ in 0..5 {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
     }
+
+    println!("[agent] shutdown requested — attempting to offload local chunks");
+
+    if matches!(role, AgentRole::Pure) {
+        if let Err(err) = offload_local_chunks(&base_dir, &controller_url, &node_id) {
+            eprintln!("[agent] offload failed: {err:?}");
+        }
+    }
+
+    println!("[agent] exiting");
+
+    Ok(())
+}
+
+fn offload_local_chunks(
+    base_dir: &Path,
+    controller_url: &str,
+    node_id: &str,
+) -> anyhow::Result<()> {
+    let client = Client::new();
+    let mut local_chunks = Vec::new();
+    collect_local_chunks(&client, controller_url, "/", node_id, &mut local_chunks)?;
+
+    if local_chunks.is_empty() {
+        println!("[agent] no local chunks to offload");
+        return Ok(());
+    }
+
+    let mesh_info = fetch_mesh_info(controller_url)?;
+    let peers = mesh_info_to_connections(mesh_info, node_id);
+
+    if peers.is_empty() {
+        println!("[agent] no peers available for offload; data remains on local disk");
+        return Ok(());
+    }
+
+    let transport = mesh::global_transport();
+
+    for (path, meta) in local_chunks {
+        let chunk_path = base_dir
+            .join(&meta.drive_id)
+            .join(format!("chunk_{}", meta.index));
+
+        match fs::read(&chunk_path) {
+            Ok(buf) => {
+                for peer in &peers {
+                    match mesh::store_remote_chunk(transport, peer, &path, meta.index, &buf) {
+                        Ok(_) => {
+                            println!(
+                                "[agent] offloaded {} chunk {} to {}",
+                                path, meta.index, peer.node_id
+                            );
+                            break;
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[agent] offload to {} failed for {} chunk {}: {:?}",
+                                peer.node_id, path, meta.index, err
+                            );
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "[agent] unable to read {:?} for offload: {:?}",
+                    chunk_path, err
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_local_chunks(
+    client: &Client,
+    controller_url: &str,
+    path: &str,
+    node_id: &str,
+    acc: &mut Vec<(String, ChunkMeta)>,
+) -> anyhow::Result<()> {
+    let url = format!("{}/fs/list?path={}", controller_url, path);
+    let res = client.get(&url).send()?;
+
+    if !res.status().is_success() {
+        return Ok(());
+    }
+
+    let listing = res.json::<ListResponse>()?;
+
+    for (_name, entry) in listing.entries {
+        match entry.node_type {
+            FsNodeType::Directory => {
+                collect_local_chunks(client, controller_url, &entry.path, node_id, acc)?;
+            }
+            FsNodeType::File => {
+                for chunk in entry.chunks {
+                    if chunk.node_id == node_id {
+                        acc.push((entry.path.clone(), chunk));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn mesh_info_to_connections(info: MeshInfo, node_id: &str) -> Vec<PeerConnection> {
+    let mut peers = Vec::new();
+
+    for p in info.peers {
+        if p.node_id == node_id {
+            continue;
+        }
+
+        if let Ok(addr) = p.endpoint.parse::<SocketAddr>() {
+            let peer_nat = match p.nat_type.as_deref() {
+                Some("FullCone") => NatType::FullCone,
+                Some("RestrictedCone") => NatType::RestrictedCone,
+                Some("PortRestrictedCone") => NatType::PortRestrictedCone,
+                Some("Symmetric") => NatType::Symmetric,
+                _ => NatType::Unknown,
+            };
+
+            peers.push(PeerConnection {
+                node_id: p.node_id,
+                addr,
+                mode: ConnectivityMode::Direct,
+                nat_type: peer_nat,
+            });
+        }
+    }
+
+    peers
 }
 
 // -----------------------------------------------------------------------------
@@ -515,28 +692,101 @@ fn drive_paths(base_dir: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
 
     fs::create_dir_all(base_dir)?;
 
-    for i in 0..3 {
-        fs::create_dir_all(base_dir.join(format!("drive{}", i)))?;
+    let mut mount_targets = match collect_lsblk_mounts() {
+        Ok(devs) => devs,
+        Err(err) => {
+            eprintln!(
+                "[agent] lsblk probe failed; using local fallback at {}: {:?}",
+                base_dir.display(),
+                err
+            );
+            Vec::new()
+        }
+    };
+    if mount_targets.is_empty() {
+        println!(
+            "[agent] lsblk reported no mounted drives; falling back to {}",
+            base_dir.display()
+        );
+        let fallback = base_dir.join("drive-fallback");
+        fs::create_dir_all(&fallback)?;
+        mount_targets.push(("drive-fallback".to_string(), fallback));
     }
 
-    for entry in fs::read_dir(base_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    for (id, target) in mount_targets {
+        let alias = base_dir.join(&id);
+
+        if alias.exists() {
+            let existing = alias.canonicalize().unwrap_or(alias.clone());
+            if existing != target {
+                if alias.is_dir() {
+                    fs::remove_dir_all(&alias)?;
+                } else {
+                    let _ = fs::remove_file(&alias);
+                }
+            }
         }
 
-        let id = entry.file_name().to_string_lossy().into_owned();
-        if !id.starts_with("drive") {
-            continue;
+        if !alias.exists() {
+            if alias == target {
+                fs::create_dir_all(&alias)?;
+            } else {
+                fs::create_dir_all(target.parent().unwrap_or(&target))?;
+                if let Err(err) = unix_fs::symlink(&target, &alias) {
+                    eprintln!(
+                        "[agent] unable to link drive {} to {}: {:?}",
+                        id,
+                        target.display(),
+                        err
+                    );
+                }
+            }
         }
 
-        drives.push((id, path));
+        drives.push((id, target));
     }
 
     drives.sort_by(|a, b| a.0.cmp(&b.0));
 
     Ok(drives)
+}
+
+fn collect_lsblk_mounts() -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let output = Command::new("lsblk")
+        .args(["-J", "-b", "-o", "NAME,MOUNTPOINT,SIZE,TYPE"])
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!("lsblk failed with status {}", output.status);
+    }
+
+    let parsed: LsblkOutput = serde_json::from_slice(&output.stdout)?;
+    let mut mounts = Vec::new();
+
+    fn walk(dev: &LsblkBlockDevice, acc: &mut Vec<(String, PathBuf)>) {
+        if dev.kind == "loop" {
+            return;
+        }
+
+        if let (Some(mp), Some(size)) = (&dev.mountpoint, dev.size) {
+            if !mp.is_empty() && size > 0 {
+                let id = format!("drive-{}", dev.name);
+                let data_root = PathBuf::from(mp).join("junknas");
+                let _ = fs::create_dir_all(&data_root);
+                acc.push((id, data_root));
+            }
+        }
+
+        for child in &dev.children {
+            walk(child, acc);
+        }
+    }
+
+    for dev in parsed.blockdevices {
+        walk(&dev, &mut mounts);
+    }
+
+    Ok(mounts)
 }
 
 fn drive_usage(path: &Path) -> anyhow::Result<(u64, u64)> {
@@ -563,17 +813,19 @@ fn drive_usage(path: &Path) -> anyhow::Result<(u64, u64)> {
 // -----------------------------------------------------------------------------
 
 fn apply_desired(base_dir: &PathBuf, desired: &HeartbeatResponse) -> anyhow::Result<()> {
-    if desired.eject {
-        println!("[agent] eject requested — clearing storage");
-        if base_dir.exists() {
-            fs::remove_dir_all(base_dir)?;
-        }
-        fs::create_dir_all(base_dir)?;
-        return Ok(());
-    }
-
     let drives = drive_paths(base_dir)?;
     let desired_bytes = desired.desired_allocation_bytes;
+
+    if desired.eject {
+        println!("[agent] eject requested — clearing storage");
+        for (_id, path) in &drives {
+            if path.exists() {
+                fs::remove_dir_all(path)?;
+            }
+            fs::create_dir_all(path)?;
+        }
+        return Ok(());
+    }
 
     if drives.is_empty() {
         println!("[agent] no drives discovered; skipping allocation");

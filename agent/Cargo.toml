@@ -21,3 +21,4 @@ async-trait = "0.1"
 fuse3 = { version = "0.5", features = ["tokio-runtime"] }
 bytes = "1"
 futures-util = "0.3"
+ctrlc = "3"

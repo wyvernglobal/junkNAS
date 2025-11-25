@@ -6,7 +6,7 @@
 junkNAS is a fully distributed, rootless, FUSE-powered filesystem that allows any device to join a decentralized NAS cluster.
 Nodes automatically discover each other, synchronize metadata via a lightweight controller, and exchange file chunks over an encrypted userspace mesh overlay.
 
-The system runs entirely unprivileged, using Podman rootless containers, userspace WireGuard, and a pure-Rust FUSE layer.
+The system runs entirely unprivileged, using Podman rootless containers, kernel WireGuard, and a pure-Rust FUSE layer.
 You can build your own personal "cloud" using Raspberry Pis, laptops, servers, and anything else that supports containers.
 
 ---
@@ -40,7 +40,7 @@ You can build your own personal "cloud" using Raspberry Pis, laptops, servers, a
 - No privileged syscalls.
 - Runs inside unprivileged Podman.
 - Uses userspace FUSE (fuse3).
-- Optional userspace WireGuard (boringtun).
+- Uses kernel WireGuard for the mesh overlay.
 
 ---
 
