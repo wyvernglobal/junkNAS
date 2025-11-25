@@ -1,6 +1,8 @@
 # junkNAS  
 ### A Rootless, Distributed, Mesh-Native Cloud Filesystem
 
+<img width="517" height="233" alt="junkNAS" src="https://github.com/user-attachments/assets/edaf999c-30b0-4079-8a1e-9bf29311fedc" />
+
 junkNAS is a fully distributed, rootless, FUSE-powered filesystem that allows any device to join a decentralized NAS cluster.
 Nodes automatically discover each other, synchronize metadata via a lightweight controller, and exchange file chunks over an encrypted userspace mesh overlay.
 
