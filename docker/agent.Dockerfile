@@ -12,13 +12,10 @@ RUN cargo build -p junknas-agent --release
 FROM debian:bookworm-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates wireguard-tools boringtun && \
+    apt-get install -y --no-install-recommends ca-certificates wireguard wireguard-tools iproute2 && \
     rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m junknas
-USER junknas
-
-WORKDIR /home/junknas
+WORKDIR /root
 COPY --from=build /app/target/release/junknas-agent /usr/local/bin/junknas-agent
 
 ENV JUNKNAS_CONTROLLER_URL="http://10.44.0.1:8080/api"

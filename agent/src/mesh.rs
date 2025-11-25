@@ -37,7 +37,7 @@ pub fn run_mesh(_private_key: String, peers: Vec<PeerConnection>, port: u16) -> 
         ));
     }
 
-    // Bring up rootless WireGuard tunnel via boringtun so packet handling stays in userspace.
+    // Bring up the kernel WireGuard plumbing early so networking errors surface fast.
     let tunnel =
         ROOTLESS_TUNNEL.get_or_try_init(|| WGTunnel::start(&_private_key).map(Mutex::new))?;
 
@@ -71,7 +71,7 @@ pub fn run_mesh(_private_key: String, peers: Vec<PeerConnection>, port: u16) -> 
             .write_packet(format!("hello:{}", peer.node_id).as_bytes());
     }
 
-    // Non-blocking poll for any packet boringtun produced so recv path is exercised.
+    // Non-blocking poll for any packet the tunnel produced so recv path is exercised.
     if let Ok(Some(pkt)) = tunnel.lock().unwrap().read_packet() {
         if let Some((_, peer)) = get_active_peers().into_iter().enumerate().next() {
             let _ = global_transport().send(peer.addr, &pkt);

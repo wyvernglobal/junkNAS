@@ -118,6 +118,32 @@ ensure_podman() {
   command -v podman >/dev/null 2>&1 || fail "podman installation failed"
 }
 
+ensure_wireguard_tools() {
+  if command -v wg >/dev/null 2>&1; then
+    return
+  fi
+
+  pmgr=$(detect_pkg_manager)
+  [ -z "$pmgr" ] && fail "wireguard-tools not found and no package manager available"
+
+  if command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+
+  log "installing wireguard-tools using $pmgr"
+
+  case "$pmgr" in
+    apt-get)
+      $SUDO apt-get update -y
+      $SUDO apt-get install -y wireguard wireguard-tools
+      ;;
+    dnf)
+      $SUDO dnf install -y wireguard wireguard-tools
+      ;;
+    yum)
+      $SUDO yum install -y wireguard wireguard-tools
+      ;;
+  esac
+}
+
 # ------------------------------------------------------------
 build_image() {
   name="$1"
@@ -127,6 +153,114 @@ build_image() {
 
   log "building image $name"
   podman build -f "$dockerfile" -t "$name" "$JUNKNAS_SOURCE_DIR"
+}
+
+detect_podman_gateway() {
+  command -v podman >/dev/null 2>&1 || return 0
+
+  if ! podman network inspect podman >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    podman network inspect podman 2>/dev/null | python3 - <<'PY'
+import json, sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+
+if not data:
+    sys.exit(0)
+
+net = data[0]
+gateway = None
+
+for plugin in net.get("plugins", []):
+    ipam = plugin.get("ipam", {})
+    for rng in ipam.get("ranges", []):
+        if not rng:
+            continue
+        gateway = rng[0].get("gateway")
+        if gateway:
+            break
+    if gateway:
+        break
+
+if not gateway:
+    for subnet in net.get("subnets", []):
+        gateway = subnet.get("gateway")
+        if gateway:
+            break
+
+if gateway:
+    print(gateway)
+PY
+  fi
+}
+
+wireguard_config_dir() {
+  if [ "$(id -u)" -eq 0 ]; then
+    echo "/etc/wireguard"
+  else
+    echo "${XDG_CONFIG_HOME:-$HOME/.config}/wireguard"
+  fi
+}
+
+generate_wireguard_mesh_configs() {
+  ensure_wireguard_tools
+
+  WG_PORT="${JUNKNAS_WG_PORT:-51820}"
+  WG_SUBNET="${JUNKNAS_WG_SUBNET:-10.44.0.0/16}"
+  WG_CTRL_ADDR="${JUNKNAS_WG_CONTROLLER_ADDRESS:-10.44.0.1/32}"
+  WG_AGENT_ADDR="${JUNKNAS_WG_AGENT_ADDRESS:-10.44.0.2/32}"
+
+  gateway="$(detect_podman_gateway)"
+  endpoint_host="${JUNKNAS_WG_ENDPOINT_HOST:-${gateway:-127.0.0.1}}"
+  endpoint="${endpoint_host}:${WG_PORT}"
+
+  cfg_dir="$(wireguard_config_dir)"
+  mkdir -p "$cfg_dir"
+  chmod 700 "$cfg_dir"
+
+  # Generate key pairs
+  ctrl_priv="$(wg genkey)"
+  ctrl_pub="$(printf '%s' "$ctrl_priv" | wg pubkey)"
+  agent_priv="$(wg genkey)"
+  agent_pub="$(printf '%s' "$agent_priv" | wg pubkey)"
+
+  ctrl_cfg="$cfg_dir/junknas-controller.conf"
+  agent_cfg="$cfg_dir/junknas-agent.conf"
+
+  old_umask="$(umask)"
+  umask 077
+  cat >"$ctrl_cfg" <<EOF
+[Interface]
+Address = ${WG_CTRL_ADDR}
+ListenPort = ${WG_PORT}
+PrivateKey = ${ctrl_priv}
+
+[Peer]
+PublicKey = ${agent_pub}
+AllowedIPs = ${WG_AGENT_ADDR}
+EOF
+
+  cat >"$agent_cfg" <<EOF
+[Interface]
+Address = ${WG_AGENT_ADDR}
+PrivateKey = ${agent_priv}
+
+[Peer]
+PublicKey = ${ctrl_pub}
+AllowedIPs = ${WG_SUBNET}
+Endpoint = ${endpoint}
+PersistentKeepalive = 25
+EOF
+
+  umask "$old_umask"
+  chmod 600 "$ctrl_cfg" "$agent_cfg"
+  log "wrote WireGuard configs to $cfg_dir (controller=${WG_CTRL_ADDR}, agent=${WG_AGENT_ADDR}, endpoint=${endpoint})"
 }
 
 # ------------------------------------------------------------
@@ -332,6 +466,7 @@ JUNKNAS_YAML_PATH="$(resolve_path "$JUNKNAS_YAML_PATH")"
 
 require_cmd curl
 ensure_podman
+ensure_wireguard_tools
 
 # Resolve working directory safely
 log "resolving junkNAS source directory"
@@ -360,6 +495,11 @@ if [ ! -f "$JUNKNAS_YAML_PATH" ]; then
 else
   log "using existing manifest"
 fi
+
+# ------------------------------------------------------------
+# Generate WireGuard configs for the mesh
+# ------------------------------------------------------------
+generate_wireguard_mesh_configs
 
 # ------------------------------------------------------------
 # Build container images locally
