@@ -142,6 +142,50 @@
       color: #8d97a8;
       font-size: 0.9rem;
     }
+    .hidden {
+      display: none;
+    }
+    .flex-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .pill {
+      background: #1a2130;
+      border: 1px solid #28344a;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.9rem;
+      color: #dbe7ff;
+    }
+    .mini-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    #samba-qr img {
+      display: block;
+      margin: 0 auto 10px auto;
+      border: 1px solid #2c3547;
+      border-radius: 8px;
+      background: #0f1115;
+      padding: 8px;
+    }
+    #samba-config-preview {
+      background: #0f1420;
+      border: 1px dashed #28344a;
+      padding: 10px;
+      border-radius: 8px;
+      margin-top: 8px;
+      white-space: pre-wrap;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      color: #dbe7ff;
+    }
+    #samba-modal .modal-content {
+      width: 520px;
+    }
   </style>
 </head>
 <body>
@@ -179,6 +223,36 @@
   </div>
 
   <div class="card" style="margin-top:16px;">
+    <h2>Samba sidecar access</h2>
+    <p class="helper">Expose junkNAS over SMB without leaking cluster private keys. The dashboard shows the WireGuard peer info for the Samba sidecar so you can sync agents and desktop clients.</p>
+    <div id="samba-card" class="hidden">
+      <div class="mini-grid">
+        <div>
+          <h3>WireGuard peer</h3>
+          <div class="helper">These are safe to share with clients; private keys stay on junkNAS.</div>
+          <div class="samba-meta">
+            <div><strong>Sidecar public key:</strong> <span id="samba-public-key" class="pill"></span></div>
+            <div><strong>Endpoint:</strong> <span id="samba-endpoint" class="pill"></span></div>
+            <div><strong>Allowed IPs:</strong> <span id="samba-allowed" class="pill"></span></div>
+            <div><strong>Client address:</strong> <span id="samba-address" class="pill"></span></div>
+          </div>
+        </div>
+        <div>
+          <h3>Mesh reference</h3>
+          <div class="helper">Use these when cross-checking peers in the controller.</div>
+          <div><strong>Controller public key:</strong> <span id="samba-mesh-public" class="pill"></span></div>
+          <div id="samba-notes" class="helper" style="margin-top:6px;"></div>
+        </div>
+      </div>
+      <div id="samba-config-preview"></div>
+      <div style="text-align:right; margin-top:12px;">
+        <button id="samba-connect">Connect via SAMBA</button>
+      </div>
+    </div>
+    <div id="samba-missing" class="helper">No Samba sidecar metadata found. Set JUNKNAS_SAMBA_* vars in init-dashboard.sh to surface the WireGuard peer.</div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
     <h2>Cluster utilities</h2>
     <div class="merge-form">
       <h3>Merge junkNAS cluster</h3>
@@ -210,6 +284,20 @@
     </div>
   </div>
 
+  <div id="samba-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2>Connect via SAMBA</h2>
+      <p class="helper">Scan the QR code or download the WireGuard config for the Samba sidecar. Replace the &lt;PrivateKey&gt; placeholder with a key generated on your device.</p>
+      <div id="samba-qr"></div>
+      <pre id="samba-config-block"></pre>
+      <div class="modal-actions">
+        <button id="samba-download">Download config file</button>
+        <button id="samba-close">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="qrcode.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -32,6 +32,7 @@ You can build your own personal "cloud" using Raspberry Pis, laptops, servers, a
 ### Dashboard
 - Lightweight HTML dashboard served from the controller.
 - Displays cluster nodes, storage, mesh scores, chunk distribution, and online/offline status.
+- Provides a "Connect via SAMBA" flow that shows the Samba sidecar WireGuard peer, plus QR/download helpers for clients (no private keys are ever shown).
 
 ### Rootless by Default
 - No privileged syscalls.
@@ -88,6 +89,12 @@ Across nodes:
 
 echo "distributed!" > /mnt/junknas/example.txt
 cat /mnt/junknas/example.txt
+
+---
+
+# Accessing junkNAS over Samba
+
+To let traditional SMB clients browse the cluster, attach a gateway host (or run a Samba sidecar) on the WireGuard VLAN and export the mounted filesystem via Samba. The dashboard exposes public-only WireGuard metadata for the sidecar and offers a **Connect via SAMBA** button that renders a QR code and downloadable client config stub. See [docs/samba-access.md](docs/samba-access.md) for a step-by-step guide to creating the WireGuard peer, mounting the agent locally, and publishing the share without leaking junkNAS private keys.
 
 ---
 
