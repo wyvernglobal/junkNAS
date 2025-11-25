@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     fs::{self, OpenOptions},
-    net::SocketAddr,
+    net::{SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     thread,
     time::Duration,
@@ -25,6 +25,45 @@ use crate::nat::{compute_score, discover_public_endpoint, measure_controller_rtt
 use crate::peers::{fetch_mesh_info, MeshInfo};
 
 const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8080/api";
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentRole {
+    Pure,
+    Samba,
+}
+
+impl AgentRole {
+    fn from_env() -> Self {
+        match std::env::var("JUNKNAS_AGENT_ROLE")
+            .unwrap_or_else(|_| "pure".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "samba" => AgentRole::Samba,
+            _ => AgentRole::Pure,
+        }
+    }
+
+    fn suffix(&self) -> &'static str {
+        match self {
+            AgentRole::Pure => "pure",
+            AgentRole::Samba => "samba",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct AgentConfig {
+    agent_id: String,
+    role: AgentRole,
+    ip: String,
+    port: u16,
+    mesh_public_key: Option<String>,
+    mesh_private_key: Option<String>,
+    allocated_bytes: u64,
+    drives: Vec<String>,
+}
 
 fn choose_controller_url() -> String {
     let mut candidates = vec![
@@ -87,6 +126,109 @@ fn controller_reachable(url: &str) -> bool {
     false
 }
 
+fn agent_config_dir() -> anyhow::Result<PathBuf> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+    let dir = home.join(".junknas").join("agent").join("config");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn detect_primary_ip() -> String {
+    let ip = UdpSocket::bind("0.0.0.0:0")
+        .and_then(|sock| {
+            let _ = sock.connect("8.8.8.8:80");
+            sock.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".to_string());
+
+    ip
+}
+
+fn load_agent_config(
+    agent_id: &str,
+    role: AgentRole,
+    preferred_port: u16,
+) -> anyhow::Result<AgentConfig> {
+    let dir = agent_config_dir()?;
+    let path = dir.join(format!("{}.conf", agent_id));
+
+    if path.exists() {
+        if let Ok(raw) = fs::read(&path) {
+            if let Ok(cfg) = serde_json::from_slice::<AgentConfig>(&raw) {
+                let used_ports = gather_used_ports(&dir);
+                if used_ports.iter().filter(|p| **p == cfg.port).count() > 1
+                    || port_in_use(cfg.port)
+                {
+                    let mut updated = cfg.clone();
+                    updated.port = select_available_port(cfg.port, &used_ports);
+                    persist_agent_config(&updated)?;
+                    return Ok(updated);
+                }
+
+                return Ok(cfg);
+            }
+        }
+    }
+
+    let used_ports = gather_used_ports(&dir);
+    let port = select_available_port(preferred_port, &used_ports);
+    let cfg = AgentConfig {
+        agent_id: agent_id.to_string(),
+        role,
+        ip: detect_primary_ip(),
+        port,
+        mesh_public_key: None,
+        mesh_private_key: None,
+        allocated_bytes: 0,
+        drives: Vec::new(),
+    };
+
+    persist_agent_config(&cfg)?;
+
+    Ok(cfg)
+}
+
+fn gather_used_ports(dir: &Path) -> Vec<u16> {
+    let mut ports = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                if let Ok(raw) = fs::read(entry.path()) {
+                    if let Ok(cfg) = serde_json::from_slice::<AgentConfig>(&raw) {
+                        ports.push(cfg.port);
+                    }
+                }
+            }
+        }
+    }
+
+    ports
+}
+
+fn select_available_port(preferred: u16, used: &[u16]) -> u16 {
+    let mut port = preferred.max(1024);
+    while used.contains(&port) || port_in_use(port) {
+        port = port.saturating_add(1);
+        if port == 0 {
+            port = 1024;
+        }
+    }
+    port
+}
+
+fn port_in_use(port: u16) -> bool {
+    UdpSocket::bind(("0.0.0.0", port)).is_err()
+}
+
+fn persist_agent_config(cfg: &AgentConfig) -> anyhow::Result<()> {
+    let dir = agent_config_dir()?;
+    let path = dir.join(format!("{}.conf", cfg.agent_id));
+    let json = serde_json::to_vec_pretty(cfg)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // Data exchanged with controller
 // -----------------------------------------------------------------------------
@@ -104,6 +246,9 @@ pub struct HeartbeatRequest {
     pub node_id: String,
     pub hostname: String,
     pub nickname: String,
+    pub role: AgentRole,
+    pub ip: Option<String>,
+    pub mesh_port: Option<u16>,
     pub drives: Vec<DriveReport>,
 
     pub mesh_endpoint: Option<String>,
@@ -149,25 +294,45 @@ fn main() -> anyhow::Result<()> {
     let controller_url = choose_controller_url();
 
     let hostname = hostname::get()?.to_string_lossy().into_owned();
-    let node_id = hostname.clone();
+    let role = AgentRole::from_env();
+
+    let node_id = std::env::var("JUNKNAS_AGENT_ID").unwrap_or_else(|_| {
+        if matches!(role, AgentRole::Pure) {
+            hostname.clone()
+        } else {
+            format!("{}-{}", hostname, role.suffix())
+        }
+    });
 
     let nickname = std::env::var("JUNKNAS_NICKNAME").unwrap_or_else(|_| hostname.clone());
 
-    // Local storage location
+    // Local storage location (pure agents only)
     let base_dir = dirs::data_local_dir()
         .ok_or_else(|| anyhow::anyhow!("could not find local data dir"))?
         .join("junknas")
         .join("storage");
 
-    fs::create_dir_all(&base_dir)?;
+    if matches!(role, AgentRole::Pure) {
+        fs::create_dir_all(&base_dir)?;
+        println!("[agent] base_dir = {:?}", base_dir);
+    }
 
-    println!("[agent] base_dir = {:?}", base_dir);
-
-    // Mesh config
-    let mesh_port: u16 = std::env::var("JUNKNAS_MESH_PORT")
+    // Mesh config with per-host port avoidance
+    let preferred_port: u16 = std::env::var("JUNKNAS_MESH_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(42000);
+        .unwrap_or(if matches!(role, AgentRole::Samba) {
+            42100
+        } else {
+            42000
+        });
+
+    let mut agent_config = load_agent_config(&node_id, role, preferred_port)?;
+    agent_config.ip = detect_primary_ip();
+    agent_config.role = role;
+    persist_agent_config(&agent_config)?;
+
+    let mesh_port = agent_config.port;
 
     // NAT discovery
     println!("[agent] NAT discovery…");
@@ -195,7 +360,11 @@ fn main() -> anyhow::Result<()> {
     println!("[agent] mesh score = {:.3}", mesh_score);
 
     let mesh_endpoint = public.public_addr.to_string();
-    let mesh_public_key = std::env::var("JUNKNAS_MESH_PUBLIC_KEY").unwrap_or("dummy-key".into());
+    let mesh_public_key = agent_config
+        .mesh_public_key
+        .clone()
+        .or_else(|| std::env::var("JUNKNAS_MESH_PUBLIC_KEY").ok())
+        .unwrap_or_else(|| "dummy-key".into());
 
     // ---------------------------------------------------------
     // spawn mesh thread
@@ -263,12 +432,19 @@ fn main() -> anyhow::Result<()> {
     let client = Client::new();
 
     loop {
-        let drives = discover_drives(&base_dir)?;
+        let drives = if matches!(role, AgentRole::Pure) {
+            discover_drives(&base_dir)?
+        } else {
+            Vec::new()
+        };
 
         let hb = HeartbeatRequest {
             node_id: node_id.clone(),
             hostname: hostname.clone(),
             nickname: nickname.clone(),
+            role,
+            ip: Some(agent_config.ip.clone()),
+            mesh_port: Some(mesh_port),
             drives: drives.clone(),
             mesh_endpoint: Some(mesh_endpoint.clone()),
             mesh_public_key: Some(mesh_public_key.clone()),
@@ -283,7 +459,19 @@ fn main() -> anyhow::Result<()> {
 
         if let Ok(r) = resp {
             if let Ok(desired) = r.json::<HeartbeatResponse>() {
-                apply_desired(&base_dir, &desired)?;
+                if matches!(role, AgentRole::Pure) {
+                    apply_desired(&base_dir, &desired)?;
+                } else {
+                    println!("[agent] samba role active; skipping storage allocation");
+                }
+
+                update_config_from_heartbeat(
+                    &mut agent_config,
+                    desired.desired_allocation_bytes,
+                    &drives,
+                    desired.mesh_public_key.clone(),
+                    desired.mesh_private_key.clone(),
+                )?;
             } else {
                 eprintln!("[agent] heartbeat: invalid response");
             }
@@ -432,4 +620,26 @@ fn apply_desired(base_dir: &PathBuf, desired: &HeartbeatResponse) -> anyhow::Res
     }
 
     Ok(())
+}
+
+fn update_config_from_heartbeat(
+    cfg: &mut AgentConfig,
+    _allocated_bytes: u64,
+    drives: &[DriveReport],
+    mesh_public_key: Option<String>,
+    mesh_private_key: Option<String>,
+) -> anyhow::Result<()> {
+    cfg.allocated_bytes = drives.iter().map(|d| d.allocated_bytes).sum();
+    cfg.drives = drives.iter().map(|d| d.id.clone()).collect();
+    cfg.ip = detect_primary_ip();
+
+    if let Some(pk) = mesh_public_key {
+        cfg.mesh_public_key = Some(pk);
+    }
+
+    if let Some(sk) = mesh_private_key {
+        cfg.mesh_private_key = Some(sk);
+    }
+
+    persist_agent_config(cfg)
 }

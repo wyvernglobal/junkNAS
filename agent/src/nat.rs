@@ -104,7 +104,7 @@ fn stun_request(sock: &UdpSocket, stun_addr: SocketAddr) -> Result<SocketAddr> {
 
 /// Discover a public endpoint using the given STUN server.
 pub fn discover_public_endpoint(stun_server: &str, bind_port: u16) -> Result<PublicEndpoint> {
-    let mut stun_addrs: Vec<SocketAddr> = stun_server
+    let stun_addrs: Vec<SocketAddr> = stun_server
         .to_socket_addrs()
         .map_err(|e| anyhow!("failed to resolve STUN server {stun_server}: {e}"))?
         .collect();
