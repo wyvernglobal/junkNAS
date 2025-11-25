@@ -11,9 +11,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::net::TcpListener;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 mod fs;
+mod wireguard;
 // -----------------------------------------------------------------------------
 // Data Structures
 // -----------------------------------------------------------------------------
@@ -253,7 +254,6 @@ async fn heartbeat(
     Json(body): Json<HeartbeatRequest>,
 ) -> Json<HeartbeatResponse> {
     let mut st = state.lock().unwrap();
-
     let keypair = st.wg_keys.get(&body.node_id).cloned();
 
     if body.role == AgentRole::Samba {
@@ -267,12 +267,16 @@ async fn heartbeat(
             },
         );
 
-        return Json(HeartbeatResponse {
+        let resp = Json(HeartbeatResponse {
             desired_allocation_bytes: 0,
             eject: false,
             mesh_public_key: keypair.as_ref().map(|k| k.public_key.clone()),
             mesh_private_key: keypair.as_ref().map(|k| k.private_key.clone()),
         });
+
+        drop(st);
+        sync_wireguard_config(&state);
+        return resp;
     }
 
     // Update node record
@@ -325,12 +329,17 @@ async fn heartbeat(
         .unwrap_or(1_073_741_824); // 1 GiB
 
     let eject = st.eject_flags.get(&body.node_id).cloned().unwrap_or(false);
-    Json(HeartbeatResponse {
+    let resp = Json(HeartbeatResponse {
         desired_allocation_bytes: alloc,
         eject,
         mesh_public_key: keypair.as_ref().map(|k| k.public_key.clone()),
         mesh_private_key: keypair.as_ref().map(|k| k.private_key.clone()),
-    })
+    });
+
+    drop(st);
+    sync_wireguard_config(&state);
+
+    resp
 }
 
 /// GET /api/mesh
@@ -388,6 +397,9 @@ async fn upsert_wg_keys(
         node.mesh_private_key = Some(body.private_key.clone());
     }
 
+    drop(st);
+    sync_wireguard_config(&state);
+
     StatusCode::NO_CONTENT
 }
 
@@ -397,4 +409,19 @@ async fn list_wg_keys(State(state): State<SharedState>) -> Json<Vec<WireGuardKey
     let st = state.lock().unwrap();
     let keys: Vec<WireGuardKeyPair> = st.wg_keys.values().cloned().collect();
     Json(keys)
+}
+
+fn sync_wireguard_config(state: &SharedState) {
+    let rendered = {
+        let st = state.lock().unwrap();
+        wireguard::render(&st)
+    };
+
+    if let Some(cfg) = rendered {
+        if let Err(e) = wireguard::write_and_reload(cfg) {
+            warn!("Failed to apply WireGuard config: {}", e);
+        }
+    } else {
+        info!("WireGuard config generation skipped (no controller keypair)");
+    }
 }
