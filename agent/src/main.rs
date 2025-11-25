@@ -21,21 +21,38 @@ use crate::peers::{fetch_mesh_info, MeshInfo};
 const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8080/api";
 
 fn choose_controller_url() -> String {
+    let mut candidates = vec![
+        // Preferred host-forwarded port
+        "http://host.containers.internal:8088/api".to_string(),
+        "http://127.0.0.1:8088/api".to_string(),
+        // Legacy port on host
+        "http://host.containers.internal:8080/api".to_string(),
+        "http://127.0.0.1:8080/api".to_string(),
+        // Overlay defaults
+        "http://10.44.0.1:8088/api".to_string(),
+        DEFAULT_CONTROLLER_URL.to_string(),
+    ];
+
     if let Ok(url) = std::env::var("JUNKNAS_CONTROLLER_URL") {
         println!(
             "[agent] using controller from JUNKNAS_CONTROLLER_URL={}",
             url
         );
-        return url;
-    }
 
-    let candidates = [
-        DEFAULT_CONTROLLER_URL.to_string(),
-        "http://host.containers.internal:8080/api".to_string(),
-        "http://host.containers.internal:8088/api".to_string(),
-        "http://127.0.0.1:8080/api".to_string(),
-        "http://127.0.0.1:8088/api".to_string(),
-    ];
+        if controller_reachable(&url) {
+            return url;
+        }
+
+        println!("[agent] JUNKNAS_CONTROLLER_URL unreachable; probing fallbacks");
+
+        if std::env::var("JUNKNAS_CONTROLLER_URL_STRICT").is_ok() {
+            return url;
+        }
+
+        if !candidates.contains(&url) {
+            candidates.insert(0, url);
+        }
+    }
 
     for url in &candidates {
         if controller_reachable(url) {

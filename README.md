@@ -79,10 +79,11 @@ another address. Only one controller should own a given junkNAS mesh—once node
 are synchronized, scale down or delete any extra controllers so a single endpoint
 remains managed by Kubernetes.
 
-For local testing without WireGuard, agents will probe a few sane defaults such as
-`host.containers.internal:8080`/`8088` and `127.0.0.1:8080`/`8088` before falling
-back to the overlay address. Set `JUNKNAS_CONTROLLER_URL` explicitly to skip
-probing when you know the correct endpoint.
+For local testing without WireGuard, agents will probe a few sane defaults—first
+`host.containers.internal:8088`/`127.0.0.1:8088`, then `host.containers.internal:8080`/`127.0.0.1:8080`
+—before falling back to the overlay address. If `JUNKNAS_CONTROLLER_URL` is set but
+unreachable, the agent now falls back to probing those addresses unless you set
+`JUNKNAS_CONTROLLER_URL_STRICT=1` to force the configured endpoint.
 
 ---
 
