@@ -19,25 +19,12 @@ spec:
         app: junknas-controller
     spec:
       containers:
-        - name: controller
+        - name: junknas-controller
           image: ghcr.io/junknas/controller:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - name: http
-              containerPort: 8080
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: junknas-controller
-  namespace: junknas
-spec:
-  selector:
-    app: junknas-controller
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8080
+            - containerPort: 8080
+              hostPort: 8088   # expose controller on host:8088
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -55,32 +42,16 @@ spec:
         app: junknas-dashboard
     spec:
       containers:
-        - name: dashboard
+        - name: junknas-dashboard
           image: ghcr.io/junknas/dashboard:latest
           imagePullPolicy: IfNotPresent
           env:
             - name: JUNKNAS_API_URL
-              value: "http://junknas-controller.junknas.svc.cluster.local/api"
+              value: "http://junknas-controller.junknas-controller.pod.local:8088/api"
           ports:
-            - name: http
-              containerPort: 80
+            - containerPort: 8080
+              hostPort: 8080   # expose dashboard on host:8080
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: junknas-dashboard
-  namespace: junknas
-spec:
-  selector:
-    app: junknas-dashboard
-  ports:
-    - name: http
-      port: 80
-      targetPort: 80
-      nodePort: 30080
-  type: NodePort
----
-# Rootless-safe agent deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -97,9 +68,8 @@ spec:
         app: junknas-agent
     spec:
       containers:
-        - name: agent
+        - name: junknas-agent
           image: ghcr.io/junknas/agent:latest
-          imagePullPolicy: IfNotPresent
           env:
             - name: JUNKNAS_CONTROLLER_URL
-              value: "http://junknas-controller.junknas.svc.cluster.local/api"
+              value: "http://junknas-controller.junknas-controller.pod.local:8088/api"

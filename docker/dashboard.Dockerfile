@@ -17,7 +17,7 @@ RUN chmod 755 /usr/local/bin/init-dashboard.sh
 
 USER junknas
 
-ENV DASHBOARD_PORT=80
+ENV DASHBOARD_PORT=8080
 
-EXPOSE 80
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/init-dashboard.sh"]
