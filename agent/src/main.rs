@@ -15,6 +15,10 @@ use std::{
     fs::{self, OpenOptions},
     net::{SocketAddr, UdpSocket},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::Duration,
 };
@@ -23,6 +27,10 @@ use walkdir::WalkDir;
 use crate::mesh::PeerConnection;
 use crate::nat::{compute_score, discover_public_endpoint, measure_controller_rtt, NatType};
 use crate::peers::{fetch_mesh_info, MeshInfo};
+use crate::{
+    fs_types::{ChunkMeta, FsNodeType, ListResponse},
+    nat::ConnectivityMode,
+};
 
 const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8080/api";
 
@@ -372,6 +380,14 @@ fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("JUNKNAS_MESH_PUBLIC_KEY").ok())
         .unwrap_or_else(|| "dummy-key".into());
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    {
+        let flag = shutdown.clone();
+        ctrlc::set_handler(move || {
+            flag.store(true, Ordering::SeqCst);
+        })?;
+    }
+
     // ---------------------------------------------------------
     // spawn mesh thread
     // ---------------------------------------------------------
@@ -437,7 +453,7 @@ fn main() -> anyhow::Result<()> {
 
     let client = Client::new();
 
-    loop {
+    while !shutdown.load(Ordering::SeqCst) {
         let drives = if matches!(role, AgentRole::Pure) {
             discover_drives(&base_dir)?
         } else {
@@ -485,8 +501,149 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[agent] controller unreachable");
         }
 
-        thread::sleep(Duration::from_secs(5));
+        for _ in 0..5 {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
     }
+
+    println!("[agent] shutdown requested — attempting to offload local chunks");
+
+    if matches!(role, AgentRole::Pure) {
+        if let Err(err) = offload_local_chunks(&base_dir, &controller_url, &node_id) {
+            eprintln!("[agent] offload failed: {err:?}");
+        }
+    }
+
+    println!("[agent] exiting");
+
+    Ok(())
+}
+
+fn offload_local_chunks(
+    base_dir: &Path,
+    controller_url: &str,
+    node_id: &str,
+) -> anyhow::Result<()> {
+    let client = Client::new();
+    let mut local_chunks = Vec::new();
+    collect_local_chunks(&client, controller_url, "/", node_id, &mut local_chunks)?;
+
+    if local_chunks.is_empty() {
+        println!("[agent] no local chunks to offload");
+        return Ok(());
+    }
+
+    let mesh_info = fetch_mesh_info(controller_url)?;
+    let peers = mesh_info_to_connections(mesh_info, node_id);
+
+    if peers.is_empty() {
+        println!("[agent] no peers available for offload; data remains on local disk");
+        return Ok(());
+    }
+
+    let transport = mesh::global_transport();
+
+    for (path, meta) in local_chunks {
+        let chunk_path = base_dir
+            .join(&meta.drive_id)
+            .join(format!("chunk_{}", meta.index));
+
+        match fs::read(&chunk_path) {
+            Ok(buf) => {
+                for peer in &peers {
+                    match mesh::store_remote_chunk(transport, peer, &path, meta.index, &buf) {
+                        Ok(_) => {
+                            println!(
+                                "[agent] offloaded {} chunk {} to {}",
+                                path, meta.index, peer.node_id
+                            );
+                            break;
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[agent] offload to {} failed for {} chunk {}: {:?}",
+                                peer.node_id, path, meta.index, err
+                            );
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!(
+                    "[agent] unable to read {:?} for offload: {:?}",
+                    chunk_path, err
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_local_chunks(
+    client: &Client,
+    controller_url: &str,
+    path: &str,
+    node_id: &str,
+    acc: &mut Vec<(String, ChunkMeta)>,
+) -> anyhow::Result<()> {
+    let url = format!("{}/fs/list?path={}", controller_url, path);
+    let res = client.get(&url).send()?;
+
+    if !res.status().is_success() {
+        return Ok(());
+    }
+
+    let listing = res.json::<ListResponse>()?;
+
+    for (_name, entry) in listing.entries {
+        match entry.node_type {
+            FsNodeType::Directory => {
+                collect_local_chunks(client, controller_url, &entry.path, node_id, acc)?;
+            }
+            FsNodeType::File => {
+                for chunk in entry.chunks {
+                    if chunk.node_id == node_id {
+                        acc.push((entry.path.clone(), chunk));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn mesh_info_to_connections(info: MeshInfo, node_id: &str) -> Vec<PeerConnection> {
+    let mut peers = Vec::new();
+
+    for p in info.peers {
+        if p.node_id == node_id {
+            continue;
+        }
+
+        if let Ok(addr) = p.endpoint.parse::<SocketAddr>() {
+            let peer_nat = match p.nat_type.as_deref() {
+                Some("FullCone") => NatType::FullCone,
+                Some("RestrictedCone") => NatType::RestrictedCone,
+                Some("PortRestrictedCone") => NatType::PortRestrictedCone,
+                Some("Symmetric") => NatType::Symmetric,
+                _ => NatType::Unknown,
+            };
+
+            peers.push(PeerConnection {
+                node_id: p.node_id,
+                addr,
+                mode: ConnectivityMode::Direct,
+                nat_type: peer_nat,
+            });
+        }
+    }
+
+    peers
 }
 
 // -----------------------------------------------------------------------------
