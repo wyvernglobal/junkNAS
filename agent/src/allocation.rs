@@ -50,12 +50,17 @@ pub fn allocate_chunk(
     }
 
     // -------------------------------------------------------
-    // Compute maximum free space across all nodes for scaling
+    // Compute maximum usable space across all nodes for scaling
     // -------------------------------------------------------
     let max_free = cluster
         .nodes
         .iter()
-        .map(|n| n.drives.iter().map(|d| d.free_bytes).sum::<u64>())
+        .map(|n| {
+            n.drives
+                .iter()
+                .map(|d| d.free_bytes.saturating_sub(d.allocated_bytes))
+                .sum::<u64>()
+        })
         .max()
         .unwrap_or(1);
 
@@ -72,7 +77,11 @@ pub fn allocate_chunk(
     let mut candidates = Vec::new();
 
     for node in &cluster.nodes {
-        let free_bytes: u64 = node.drives.iter().map(|d| d.free_bytes).sum();
+        let free_bytes: u64 = node
+            .drives
+            .iter()
+            .map(|d| d.free_bytes.saturating_sub(d.allocated_bytes))
+            .sum();
 
         let free_ratio = free_bytes as f32 / max_free as f32;
         let combined = W_SCORE * node.mesh_score + W_SPACE * free_ratio;
