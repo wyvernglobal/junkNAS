@@ -224,7 +224,7 @@
 
   <div class="card" style="margin-top:16px;">
     <h2>Samba sidecar access</h2>
-    <p class="helper">Expose junkNAS over SMB without leaking cluster private keys. The dashboard shows the WireGuard peer info for the Samba sidecar so you can sync agents and desktop clients.</p>
+      <p class="helper">Expose junkNAS over SMB without leaking cluster private keys. The dashboard shows the WireGuard peer info for the Samba sidecar so you can sync agents and desktop clients. The dashboard will generate a dedicated WireGuard private key for Samba clients so you never have to reuse the junkNAS mesh key.</p>
     <div id="samba-card" class="hidden">
       <div class="mini-grid">
         <div>
@@ -287,7 +287,7 @@
   <div id="samba-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
       <h2>Connect via SAMBA</h2>
-      <p class="helper">Scan the QR code or download the WireGuard config for the Samba sidecar. Replace the &lt;PrivateKey&gt; placeholder with a key generated on your device.</p>
+      <p class="helper">Scan the QR code or download the WireGuard config for the Samba sidecar. The dashboard generates a fresh WireGuard private key for this config; do not reuse the junkNAS mesh private key for Samba access.</p>
       <div id="samba-qr"></div>
       <pre id="samba-config-block"></pre>
       <div class="modal-actions">

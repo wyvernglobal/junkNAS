@@ -136,7 +136,7 @@ generate_default_yaml() {
   mkdir -p "$(dirname "$JUNKNAS_YAML_PATH")"
 
   cat >"$JUNKNAS_YAML_PATH" <<'EOF'
-# Default junkNAS manifest (shortened for brevity)
+# Default junkNAS manifest (with Samba sidecar)
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -173,7 +173,8 @@ spec:
   selector:
     app: junknas-controller
   ports:
-    - port: 80
+    - name: http
+      port: 8080
       targetPort: 8080
 ---
 apiVersion: apps/v1
@@ -195,8 +196,25 @@ spec:
         - name: dashboard
           image: ghcr.io/junknas/dashboard:latest
           imagePullPolicy: IfNotPresent
+          env:
+            - name: JUNKNAS_API_URL
+              value: "http://junknas-controller.junknas.svc.cluster.local:8080/api"
+            - name: JUNKNAS_SAMBA_ENABLED
+              value: "true"
+            - name: JUNKNAS_SAMBA_PUBLIC_KEY
+              value: "samba-sidecar-public-key"
+            - name: JUNKNAS_SAMBA_ENDPOINT
+              value: "junknas-samba.junknas.svc.cluster.local:51820"
+            - name: JUNKNAS_SAMBA_ALLOWED_IPS
+              value: "10.44.0.0/16"
+            - name: JUNKNAS_SAMBA_CLIENT_ADDRESS
+              value: "10.44.0.80/32"
+            - name: JUNKNAS_SAMBA_DNS
+              value: "1.1.1.1"
+            - name: JUNKNAS_SAMBA_NOTE
+              value: "Samba sidecar runs on the WireGuard VLAN; clients should use the generated key instead of cluster keys."
           ports:
-            - containerPort: 80
+            - containerPort: 8080
 ---
 apiVersion: v1
 kind: Service
@@ -207,8 +225,101 @@ spec:
   selector:
     app: junknas-dashboard
   ports:
-    - port: 80
-      targetPort: 80
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-agent
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-agent
+  template:
+    metadata:
+      labels:
+        app: junknas-agent
+    spec:
+      containers:
+        - name: junknas-agent
+          image: ghcr.io/junknas/agent:latest
+          env:
+            - name: JUNKNAS_CONTROLLER_URL
+              value: "http://junknas-controller.junknas.svc.cluster.local:8080/api"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: junknas-samba
+  namespace: junknas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: junknas-samba
+  template:
+    metadata:
+      labels:
+        app: junknas-samba
+    spec:
+      containers:
+        - name: junknas-agent
+          image: ghcr.io/junknas/agent:latest
+          imagePullPolicy: IfNotPresent
+          args: ["mount", "/mnt/junknas"]
+          env:
+            - name: JUNKNAS_CONTROLLER_URL
+              value: "http://junknas-controller.junknas.svc.cluster.local:8080/api"
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+          volumeMounts:
+            - name: fuse
+              mountPath: /dev/fuse
+            - name: junknas-data
+              mountPath: /var/lib/junknas
+            - name: junknas-mnt
+              mountPath: /mnt/junknas
+        - name: samba
+          image: docker.io/dperson/samba:latest
+          imagePullPolicy: IfNotPresent
+          args: ["-s", "junknas;/srv/junknas;yes;no;yes"]
+          env:
+            - name: USER
+              value: junknas
+            - name: PASS
+              value: junknas
+          ports:
+            - containerPort: 445
+          volumeMounts:
+            - name: junknas-mnt
+              mountPath: /srv/junknas
+      volumes:
+        - name: fuse
+          hostPath:
+            path: /dev/fuse
+        - name: junknas-data
+          emptyDir: {}
+        - name: junknas-mnt
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: junknas-samba
+  namespace: junknas
+spec:
+  selector:
+    app: junknas-samba
+  ports:
+    - name: smb
+      port: 445
+      targetPort: 445
 EOF
 }
 
