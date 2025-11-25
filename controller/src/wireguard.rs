@@ -1,4 +1,7 @@
 use anyhow::Result;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use rand::rngs::OsRng;
 use std::{
     env, fs,
     net::IpAddr,
@@ -6,8 +9,24 @@ use std::{
     process::Command,
 };
 use tracing::{info, warn};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::{ControllerState, MeshPeer, NodeState};
+
+/// Generates a new WireGuard keypair using x25519 and base64 encoding.
+pub fn generate_keypair(node_id: &str) -> Result<crate::WireGuardKeyPair> {
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&secret);
+
+    let private_key = STANDARD.encode(secret.to_bytes());
+    let public_key = STANDARD.encode(public.to_bytes());
+
+    Ok(crate::WireGuardKeyPair {
+        node_id: node_id.to_string(),
+        public_key,
+        private_key,
+    })
+}
 
 /// Rendered WireGuard configuration plus file/iface metadata.
 pub struct RenderedConfig {
@@ -122,17 +141,8 @@ pub fn write_and_reload(cfg: RenderedConfig) -> Result<()> {
 pub fn ensure_config_file(interface: &str) -> Result<PathBuf> {
     let path = config_path(interface);
 
-    if !path.exists() {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(&path, "# junkNAS WireGuard configuration\n")?;
-        info!(
-            "Created placeholder WireGuard config at {} for interface {}",
-            path.display(),
-            interface
-        );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
 
     Ok(path)

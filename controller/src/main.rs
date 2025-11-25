@@ -7,6 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    env,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
@@ -181,6 +182,9 @@ async fn main() -> anyhow::Result<()> {
     // Ensure the WireGuard config file exists before starting the controller.
     let interface = wireguard::default_interface();
     wireguard::ensure_config_file(&interface)?;
+
+    ensure_controller_keypair(&state)?;
+    sync_wireguard_config(&state);
 
     // Build API routes
     let app = Router::new()
@@ -428,4 +432,22 @@ fn sync_wireguard_config(state: &SharedState) {
     } else {
         info!("WireGuard config generation skipped (no controller keypair)");
     }
+}
+
+fn ensure_controller_keypair(state: &SharedState) -> anyhow::Result<()> {
+    let node_id = env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".to_string());
+
+    let mut st = state.lock().unwrap();
+    if st.wg_keys.contains_key(&node_id) {
+        return Ok(());
+    }
+
+    let keypair = wireguard::generate_keypair(&node_id)?;
+    info!(
+        "Generated WireGuard keypair for controller node {}",
+        node_id
+    );
+    st.wg_keys.insert(node_id, keypair);
+
+    Ok(())
 }
