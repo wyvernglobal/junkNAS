@@ -76,7 +76,7 @@ The Samba sidecar is a regular WireGuard peer; it never requires the cluster’s
 Run the junkNAS agent on the same host so the WireGuard peer can read/write the distributed filesystem locally:
 ```bash
 podman run -it --device /dev/fuse --cap-add SYS_ADMIN --userns=keep-id \
-  -e JUNKNAS_CONTROLLER_URL="http://<controller-wg-ip>:8080/api" \
+  -e JUNKNAS_CONTROLLER_URL="http://<controller-wg-ip>:8008/api" \
   -v junknas-samba-data:/var/lib/junknas \
   -v /mnt/junknas:/mnt/junknas \
   junknas

@@ -12,6 +12,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::net::TcpListener;
+use tower_http::services::ServeDir;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 mod fs;
@@ -94,6 +95,7 @@ pub struct HeartbeatRequest {
     // Mesh metadata
     pub mesh_endpoint: Option<String>,
     pub mesh_public_key: Option<String>,
+    pub mesh_private_key: Option<String>,
     pub mesh_score: Option<f32>,
     pub mesh_nat_type: Option<String>,
 }
@@ -269,7 +271,18 @@ async fn main() -> anyhow::Result<()> {
     sync_wireguard_config(&state);
 
     // Build API routes
-    let app = Router::new()
+    let api_port: u16 = env::var("JUNKNAS_API_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8008);
+    let dashboard_port: u16 = env::var("JUNKNAS_DASHBOARD_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(8080);
+    let dashboard_dir =
+        env::var("DASHBOARD_DIR").unwrap_or_else(|_| "/srv/junknas-dashboard".into());
+
+    let api_app = Router::new()
         .route("/api/nodes", get(list_nodes))
         .route("/api/samba-hosts", get(list_samba_hosts))
         .route(
@@ -289,12 +302,24 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/fs/delete", axum::routing::delete(fs::delete))
         .with_state(state);
 
-    let addr: SocketAddr = "0.0.0.0:8080".parse().unwrap();
-    info!("junkNAS Controller listening on {}", addr);
+    let dashboard_app = Router::new().fallback_service(ServeDir::new(dashboard_dir.clone()));
 
-    let listener = TcpListener::bind(addr).await?;
+    let api_addr: SocketAddr = format!("0.0.0.0:{}", api_port).parse().unwrap();
+    let ui_addr: SocketAddr = format!("0.0.0.0:{}", dashboard_port).parse().unwrap();
 
-    axum::serve(listener, app.into_make_service()).await?;
+    info!("junkNAS Controller API listening on {}", api_addr);
+    info!(
+        "junkNAS Dashboard served from {} on {}",
+        dashboard_dir, ui_addr
+    );
+
+    let api_listener = TcpListener::bind(api_addr).await?;
+    let ui_listener = TcpListener::bind(ui_addr).await?;
+
+    tokio::try_join!(
+        axum::serve(api_listener, api_app.into_make_service()),
+        axum::serve(ui_listener, dashboard_app.into_make_service()),
+    )?;
 
     Ok(())
 }
@@ -438,6 +463,20 @@ async fn heartbeat(
     Json(body): Json<HeartbeatRequest>,
 ) -> Json<HeartbeatResponse> {
     let mut st = state.lock().unwrap();
+
+    if let (Some(public), Some(private)) =
+        (body.mesh_public_key.clone(), body.mesh_private_key.clone())
+    {
+        st.wg_keys.insert(
+            body.node_id.clone(),
+            WireGuardKeyPair {
+                node_id: body.node_id.clone(),
+                public_key: public,
+                private_key: private,
+            },
+        );
+    }
+
     let keypair = st.wg_keys.get(&body.node_id).cloned();
 
     if body.role == AgentRole::Samba {
@@ -479,7 +518,10 @@ async fn heartbeat(
                 .mesh_public_key
                 .clone()
                 .or_else(|| keypair.as_ref().map(|k| k.public_key.clone())),
-            mesh_private_key: keypair.as_ref().map(|k| k.private_key.clone()),
+            mesh_private_key: body
+                .mesh_private_key
+                .clone()
+                .or_else(|| keypair.as_ref().map(|k| k.private_key.clone())),
             mesh_score: body.mesh_score,
             mesh_nat_type: body.mesh_nat_type.clone(),
         },
