@@ -22,9 +22,21 @@ spec:
         - name: junknas-controller
           image: ghcr.io/junknas/controller:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
           ports:
             - containerPort: 8080
               hostPort: 8088   # expose controller on host:8088
+          volumeMounts:
+            - name: junknas-wireguard
+              mountPath: /etc/wireguard
+              readOnly: true
+      volumes:
+        - name: junknas-wireguard
+          secret:
+            secretName: junknas-wireguard
+            optional: true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -84,6 +96,9 @@ spec:
       containers:
         - name: junknas-agent
           image: ghcr.io/junknas/agent:latest
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN"]
           env:
             - name: JUNKNAS_CONTROLLER_URL
               value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
@@ -98,6 +113,9 @@ spec:
               mountPath: /root/.local/share/junknas
             - name: junknas-agent-config
               mountPath: /root/.junknas
+            - name: junknas-wireguard
+              mountPath: /etc/wireguard
+              readOnly: true
       volumes:
         - name: junknas-agent-data
           persistentVolumeClaim:
@@ -105,6 +123,10 @@ spec:
         - name: junknas-agent-config
           persistentVolumeClaim:
             claimName: junknas-agent-config
+        - name: junknas-wireguard
+          secret:
+            secretName: junknas-wireguard
+            optional: true
 
 ---
 apiVersion: apps/v1
