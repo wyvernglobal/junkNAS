@@ -1,4 +1,3 @@
-
 use anyhow::{anyhow, Result};
 use getrandom::getrandom;
 use serde::{Deserialize, Serialize};
@@ -45,8 +44,8 @@ fn stun_request(sock: &UdpSocket, stun_addr: SocketAddr) -> Result<SocketAddr> {
     tx[5] = 0x12;
     tx[6] = 0xA4;
     tx[7] = 0x42; // Magic Cookie
-    // Random transaction ID.
-    getrandom(&mut tx[8..])?;
+                  // Random transaction ID.
+    getrandom(&mut tx[8..]).map_err(|e| anyhow!("random id generation failed: {e:?}"))?;
 
     sock.send_to(&tx, stun_addr)?;
 
@@ -104,10 +103,7 @@ fn stun_request(sock: &UdpSocket, stun_addr: SocketAddr) -> Result<SocketAddr> {
 }
 
 /// Discover a public endpoint using the given STUN server.
-pub fn discover_public_endpoint(
-    stun_server: &str,
-    bind_port: u16,
-) -> Result<PublicEndpoint> {
+pub fn discover_public_endpoint(stun_server: &str, bind_port: u16) -> Result<PublicEndpoint> {
     let stun_addr: SocketAddr = stun_server.parse()?;
     let sock = UdpSocket::bind(("0.0.0.0", bind_port))?;
     sock.set_nonblocking(false)?;

@@ -1,4 +1,3 @@
-
 use anyhow::Result;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -6,7 +5,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MeshPeer {
     pub node_id: String,
-    pub endpoint: String,     // "ip:port"
+    pub endpoint: String, // "ip:port"
     pub public_key: String,
     pub score: f32,
     pub nat_type: Option<String>,

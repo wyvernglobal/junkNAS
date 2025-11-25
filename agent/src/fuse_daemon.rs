@@ -1,14 +1,14 @@
 use anyhow::{anyhow, Result};
-use fuse3::{
-    raw::{
-        FileAttr, FileType, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen, ReplyWrite,
-    },
-    AsyncFileSystem, MountOptions,
-};
-use libc::{EIO, EISDIR, ENOENT, ENOSYS};
+use bytes::Bytes;
+use fuse3::raw::prelude::*;
+use fuse3::raw::Session;
+use fuse3::Inode;
+use fuse3::Result as FuseResult;
+use fuse3::{Errno, FileType, MountOptions, Timestamp};
+use futures_util::stream;
+use libc::{EIO, EISDIR, ENOENT};
 use once_cell::sync::OnceCell;
 use reqwest::Client;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::runtime::Runtime;
 
@@ -78,11 +78,11 @@ pub fn internal_read_local_chunk(path: &str, index: u64) -> Result<Vec<u8>> {
 }
 
 pub fn internal_store_local_chunk(
-    path: &str,
+    _path: &str,
     index: u64,
     drive_id: &str,
     data: &[u8],
-    hash: &str,
+    _hash: &str,
 ) -> Result<()> {
     let fs = GLOBAL_FS.get().expect("FUSE not initialized");
 
@@ -257,14 +257,10 @@ impl JunkNasFs {
     // ---------------------------------------------------
 
     async fn fetch_remote_chunk(&self, meta: &ChunkMeta, path: &str) -> Result<Vec<u8>> {
-        let peers = mesh::get_active_peers();
-        let peers = peers.lock().unwrap();
-
-        let peer = peers
-            .iter()
+        let peer = mesh::get_active_peers()
+            .into_iter()
             .find(|p| p.node_id == meta.node_id)
-            .ok_or_else(|| anyhow!("peer not found"))?
-            .clone();
+            .ok_or_else(|| anyhow!("peer not found"))?;
 
         let transport = mesh::global_transport();
         mesh::fetch_remote_chunk(transport, &peer, path, meta.index)
@@ -275,25 +271,13 @@ impl JunkNasFs {
     // ---------------------------------------------------
 
     async fn store_remote_chunk(&self, meta: &ChunkMeta, path: &str, data: &[u8]) -> Result<()> {
-        let peers = mesh::get_active_peers();
-        let peers = peers.lock().unwrap();
-
-        let peer = peers
-            .iter()
+        let peer = mesh::get_active_peers()
+            .into_iter()
             .find(|p| p.node_id == meta.node_id)
-            .ok_or_else(|| anyhow!("peer not found"))?
-            .clone();
+            .ok_or_else(|| anyhow!("peer not found"))?;
 
         let transport = mesh::global_transport();
-        mesh::store_remote_chunk(
-            transport,
-            &peer,
-            path,
-            meta.index,
-            &meta.drive_id,
-            data,
-            &meta.chunk_hash,
-        )
+        mesh::store_remote_chunk(transport, &peer, path, meta.index, data)
     }
 
     // ---------------------------------------------------
@@ -321,19 +305,23 @@ fn entry_to_attr(entry: &FsEntry) -> FileAttr {
     };
     FileAttr {
         ino,
+        generation: 0,
         size: entry.size,
         blocks: (entry.size + 511) / 512,
-        atime: entry.mtime.into(),
-        mtime: entry.mtime.into(),
-        ctime: entry.ctime.into(),
-        crtime: entry.ctime.into(),
+        atime: Timestamp::new(entry.mtime as i64, 0),
+        mtime: Timestamp::new(entry.mtime as i64, 0),
+        ctime: Timestamp::new(entry.ctime as i64, 0),
+        #[cfg(target_os = "macos")]
+        crtime: Timestamp::new(entry.ctime as i64, 0),
         kind: ftype,
         perm: entry.mode as u16,
         uid: 1000,
         gid: 1000,
         rdev: 0,
-        nlink: 1,
+        #[cfg(target_os = "macos")]
         flags: 0,
+        blksize: 512,
+        nlink: 1,
     }
 }
 
@@ -342,35 +330,47 @@ fn entry_to_attr(entry: &FsEntry) -> FileAttr {
 // ===========================================================
 
 #[async_trait::async_trait]
-impl AsyncFileSystem for JunkNasFs {
-    type FileHandle = ();
-    type DirHandle = ();
+impl Filesystem for JunkNasFs {
+    type DirEntryStream = stream::Iter<std::vec::IntoIter<FuseResult<DirectoryEntry>>>;
+    type DirEntryPlusStream = stream::Iter<std::vec::IntoIter<FuseResult<DirectoryEntryPlus>>>;
 
-    // ------------------------------------------------------
-    // LOOKUP (unchanged)
-    // ------------------------------------------------------
-    async fn lookup(&self, _parent: u64, name: &OsStr, reply: ReplyEntry) {
+    async fn init(&self, _req: Request) -> FuseResult<()> {
+        Ok(())
+    }
+
+    async fn destroy(&self, _req: Request) {}
+
+    async fn lookup(&self, _req: Request, _parent: Inode, name: &OsStr) -> FuseResult<ReplyEntry> {
         let n = name.to_string_lossy();
         let path = format!("/{}", n);
 
         match self.get_entry(&path).await {
             Ok(Some(e)) => {
                 let attr = entry_to_attr(&e);
-                reply.entry(&Duration::from_secs(1), &attr, 0);
+                Ok(ReplyEntry {
+                    ttl: Duration::from_secs(1),
+                    attr,
+                    generation: 0,
+                })
             }
-            Ok(None) => reply.error(ENOENT),
-            Err(_) => reply.error(EIO),
+            Ok(None) => Err(ENOENT.into()),
+            Err(_) => Err(EIO.into()),
         }
     }
 
-    // ------------------------------------------------------
-    // GETATTR (unchanged)
-    // ------------------------------------------------------
-    async fn getattr(&self, ino: u64, reply: ReplyAttr) {
+    async fn getattr(
+        &self,
+        _req: Request,
+        ino: Inode,
+        _fh: Option<u64>,
+        _flags: u32,
+    ) -> FuseResult<ReplyAttr> {
         if ino == inode_for("/") {
             if let Ok(Some(e)) = self.get_entry("/").await {
-                reply.attr(&Duration::from_secs(1), &entry_to_attr(&e));
-                return;
+                return Ok(ReplyAttr {
+                    ttl: Duration::from_secs(1),
+                    attr: entry_to_attr(&e),
+                });
             }
         }
 
@@ -379,74 +379,72 @@ impl AsyncFileSystem for JunkNasFs {
         drop(c);
 
         if let Some(e) = e {
-            reply.attr(&Duration::from_secs(1), &entry_to_attr(&e));
+            Ok(ReplyAttr {
+                ttl: Duration::from_secs(1),
+                attr: entry_to_attr(&e),
+            })
         } else {
-            reply.error(ENOENT);
+            Err(ENOENT.into())
         }
     }
 
-    // ------------------------------------------------------
-    // READDIR (unchanged)
-    // ------------------------------------------------------
     async fn readdir(
         &self,
-        ino: u64,
-        _fh: &Self::DirHandle,
+        _req: Request,
+        ino: Inode,
+        _fh: u64,
         offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
+    ) -> FuseResult<ReplyDirectory<Self::DirEntryStream>> {
         if offset != 0 {
-            reply.ok();
-            return;
+            return Ok(ReplyDirectory {
+                entries: stream::iter(Vec::new().into_iter()),
+            });
         }
 
-        let path = match self.path_from_ino(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(EIO);
-                return;
-            }
-        };
+        let path = self.path_from_ino(ino).ok_or_else(|| Errno::from(EIO))?;
 
         match self.fetch_list(&path).await {
             Ok(Some(list)) => {
                 let mut idx = 1;
+                let mut entries = Vec::new();
                 for (name, entry) in list.entries {
                     let ino2 = inode_for(&entry.path);
                     let ft = match entry.node_type {
                         FsNodeType::Directory => FileType::Directory,
                         FsNodeType::File => FileType::RegularFile,
                     };
-                    reply.add(ino2, idx, ft, name);
+                    entries.push(Ok(DirectoryEntry {
+                        inode: ino2,
+                        kind: ft,
+                        name: name.into(),
+                        offset: idx,
+                    }));
                     idx += 1;
 
                     self.cache.lock().unwrap().insert(entry.path.clone(), entry);
                 }
-                reply.ok();
+
+                Ok(ReplyDirectory {
+                    entries: stream::iter(entries.into_iter()),
+                })
             }
-            Ok(None) => reply.error(ENOENT),
-            Err(_) => reply.error(EIO),
+            Ok(None) => Err(ENOENT.into()),
+            Err(_) => Err(EIO.into()),
         }
     }
 
-    // ------------------------------------------------------
-    // OPEN (we accept O_CREAT via write() logic)
-    // ------------------------------------------------------
-    async fn open(&self, _ino: u64, _flags: i32, reply: ReplyOpen) {
-        reply.opened(0, 0);
+    async fn open(&self, _req: Request, _ino: Inode, _flags: u32) -> FuseResult<ReplyOpen> {
+        Ok(ReplyOpen { fh: 0, flags: 0 })
     }
 
-    // ------------------------------------------------------
-    // READ (unchanged from step 4)
-    // ------------------------------------------------------
     async fn read(
         &self,
-        ino: u64,
-        _fh: &Self::FileHandle,
-        offset: i64,
+        _req: Request,
+        ino: Inode,
+        _fh: u64,
+        offset: u64,
         size: u32,
-        reply: ReplyData,
-    ) {
+    ) -> FuseResult<ReplyData> {
         let entry = {
             let c = self.cache.lock().unwrap();
             c.values().find(|e| inode_for(&e.path) == ino).cloned()
@@ -454,23 +452,17 @@ impl AsyncFileSystem for JunkNasFs {
 
         let entry = match entry {
             Some(e) => e,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
+            None => return Err(ENOENT.into()),
         };
 
         if entry.node_type != FsNodeType::File {
-            reply.error(EISDIR);
-            return;
+            return Err(EISDIR.into());
         }
 
-        let offset = offset as u64;
         let end = (offset + size as u64).min(entry.size);
 
         if offset >= entry.size {
-            reply.data(&[]);
-            return;
+            return Ok(ReplyData::from(Bytes::new()));
         }
 
         const CHUNK: u64 = 64 * 1024;
@@ -481,119 +473,86 @@ impl AsyncFileSystem for JunkNasFs {
         let mut out = Vec::new();
 
         for idx in first..=last {
-            let meta = entry.chunks.iter().find(|c| c.index == idx);
-            let meta = match meta {
+            let meta = match entry.chunks.iter().find(|c| c.index == idx) {
                 Some(m) => m,
-                None => {
-                    reply.error(EIO);
-                    return;
-                }
+                None => return Err(EIO.into()),
             };
 
-            let data = match self.read_local_chunk(meta) {
-                Ok(d) => d,
-                Err(_) => match self.fetch_remote_chunk(meta, &entry.path).await {
-                    Ok(d) => d,
-                    Err(_) => {
-                        reply.error(EIO);
-                        return;
-                    }
-                },
-            };
-
-            let chunk_off = idx * CHUNK;
-            let start = if offset > chunk_off {
-                (offset - chunk_off) as usize
+            let buf = if meta.node_id == self.node_id {
+                self.read_local_chunk(meta)
             } else {
-                0
+                self.fetch_remote_chunk(meta, &entry.path).await
             };
 
-            let end2 = ((end - chunk_off) as usize).min(data.len());
+            let mut data = match buf {
+                Ok(d) => d,
+                Err(_) => return Err(EIO.into()),
+            };
 
-            if start < end2 {
-                out.extend_from_slice(&data[start..end2]);
-            }
+            // truncate to requested range
+            let chunk_start = idx * CHUNK;
+            let chunk_end = chunk_start + CHUNK;
+            let start = offset.max(chunk_start);
+            let end = end.min(chunk_end);
+            let start_off = (start - chunk_start) as usize;
+            let len = (end - start) as usize;
+            data = data[start_off..start_off + len].to_vec();
+
+            out.extend_from_slice(&data);
         }
 
-        reply.data(&out);
+        Ok(ReplyData::from(Bytes::from(out)))
     }
 
-    // ------------------------------------------------------
-    // WRITE — FULL DISTRIBUTED WRITE PIPELINE
-    // ------------------------------------------------------
     async fn write(
         &self,
-        ino: u64,
-        _fh: &Self::FileHandle,
-        offset: i64,
-        data: Vec<u8>,
-        reply: ReplyWrite,
-    ) {
-        let mut entry = {
-            let c = self.cache.lock().unwrap();
-            c.values().find(|e| inode_for(&e.path) == ino).cloned()
+        _req: Request,
+        ino: Inode,
+        _fh: u64,
+        offset: u64,
+        data: &[u8],
+        _flags: u32,
+    ) -> FuseResult<ReplyWrite> {
+        let path = self.path_from_ino(ino).ok_or_else(|| Errno::from(ENOENT))?;
+
+        // fetch metadata
+        let entry = match self.get_entry(&path).await {
+            Ok(Some(e)) => e,
+            Ok(None) => return Err(ENOENT.into()),
+            Err(_) => return Err(EIO.into()),
         };
 
-        // --------------------------------------------------
-        // If missing: implicit create
-        // --------------------------------------------------
-        if entry.is_none() {
-            let path = {
-                let c = self.cache.lock().unwrap();
-                let e = c.values().find(|e| inode_for(&e.path) == ino);
-                match e {
-                    Some(e) => e.path.clone(),
-                    None => {
-                        reply.error(ENOENT);
-                        return;
-                    }
-                }
-            };
-            println!("[write] creating file {}", path);
-            self.create_file_in_controller(&path, 0o644).await.unwrap();
-            entry = self.get_entry(&path).await.unwrap();
-        }
-
-        let mut entry = entry.unwrap();
-        let path = entry.path.clone();
-
-        // --------------------------------------------------
-        // Write parameters
-        // --------------------------------------------------
-        let offset = offset as u64;
-        let write_len = data.len() as u64;
-        let end_pos = offset + write_len;
-
-        const CHUNK: u64 = 64 * 1024;
-
-        let first = offset / CHUNK;
-        let last = (end_pos - 1) / CHUNK;
+        let cluster = get_cluster_state();
 
         let mut new_chunks = entry.chunks.clone();
 
-        // cluster state for allocation
-        let cluster = get_cluster_state();
+        let end_pos = offset + data.len() as u64;
+
+        const CHUNK: u64 = 64 * 1024;
 
         // --------------------------------------------------
-        // Write each chunk
+        // For each chunk, merge old + new data
         // --------------------------------------------------
-        for idx in first..=last {
-            let chunk_off = idx * CHUNK;
-            let start_off = if offset > chunk_off {
-                (offset - chunk_off) as usize
-            } else {
-                0
-            };
-            let end_off = ((end_pos - chunk_off) as usize).min(CHUNK as usize);
+        let mut write_len = 0;
 
-            // slice of user data for this chunk
-            let mut chunk_new = data[(offset + (idx * CHUNK) - offset) as usize..].to_vec();
-            if chunk_new.len() > (end_off - start_off) {
-                chunk_new.resize(end_off - start_off, 0);
-            }
+        for idx in offset / CHUNK..=(end_pos - 1) / CHUNK {
+            // existing chunk data (or zeroes)
+            let chunk_start = idx * CHUNK;
+            let chunk_end = chunk_start + CHUNK;
 
-            // load old chunk if needed for partial overwrite
-            let mut merged = vec![0u8; end_off];
+            let start = offset.max(chunk_start);
+            let end = end_pos.min(chunk_end);
+
+            // portion of new data that belongs to this chunk
+            let start_off = (start - offset) as usize;
+            let end_off = (end - offset) as usize;
+
+            let chunk_new = &data[start_off..end_off];
+
+            write_len += chunk_new.len();
+
+            // start with zeros
+            let mut merged = vec![0u8; CHUNK as usize];
 
             if let Some(old_meta) = new_chunks.iter().find(|c| c.index == idx) {
                 let old_data = if old_meta.node_id == self.node_id {
@@ -631,17 +590,14 @@ impl AsyncFileSystem for JunkNasFs {
                     chunk_hash: hash_hex.clone(),
                 }
             } else {
-                allocate_chunk(&path, idx, &cluster, &hash_hex)?
+                allocate_chunk(&path, idx, &cluster, &hash_hex).map_err(|_| Errno::from(EIO))?
             };
 
             // store locally or remote
             if meta.node_id == self.node_id {
                 self.store_local_chunk(&meta, &merged).unwrap();
-            } else {
-                if let Err(e) = self.store_remote_chunk(&meta, &path, &merged).await {
-                    reply.error(EIO);
-                    return;
-                }
+            } else if let Err(_) = self.store_remote_chunk(&meta, &path, &merged).await {
+                return Err(EIO.into());
             }
 
             // update chunk list
@@ -659,15 +615,12 @@ impl AsyncFileSystem for JunkNasFs {
         // new file size
         let new_size = end_pos.max(entry.size);
 
-        if let Err(_) = self.update_file_size(&path, new_size).await {
-            reply.error(EIO);
-            return;
-        }
-
-        if let Err(_) = self.update_file_chunks(&path, &new_chunks).await {
-            reply.error(EIO);
-            return;
-        }
+        self.update_file_size(&path, new_size)
+            .await
+            .map_err(|_| EIO)?;
+        self.update_file_chunks(&path, &new_chunks)
+            .await
+            .map_err(|_| EIO)?;
 
         // update cache entry
         let mut new_entry = entry.clone();
@@ -679,17 +632,22 @@ impl AsyncFileSystem for JunkNasFs {
             .unwrap()
             .insert(path.clone(), new_entry.clone());
 
-        reply.written(write_len as u32);
+        Ok(ReplyWrite {
+            written: write_len as u32,
+        })
     }
 
-    async fn mkdir(&self, parent: u64, name: &OsStr, mode: u32, reply: ReplyEntry) {
-        let parent_path = match self.path_from_ino(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
+    async fn mkdir(
+        &self,
+        _req: Request,
+        parent: Inode,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+    ) -> FuseResult<ReplyEntry> {
+        let parent_path = self
+            .path_from_ino(parent)
+            .ok_or_else(|| Errno::from(ENOENT))?;
 
         let child = name.to_string_lossy();
         let path = if parent_path == "/" {
@@ -702,20 +660,20 @@ impl AsyncFileSystem for JunkNasFs {
             Ok(entry) => {
                 let attr = entry_to_attr(&entry);
                 self.cache.lock().unwrap().insert(path, entry);
-                reply.entry(&Duration::from_secs(1), &attr, 0);
+                Ok(ReplyEntry {
+                    ttl: Duration::from_secs(1),
+                    attr,
+                    generation: 0,
+                })
             }
-            Err(_) => reply.error(EIO),
+            Err(_) => Err(EIO.into()),
         }
     }
 
-    async fn unlink(&self, parent: u64, name: &OsStr, reply: fuse3::raw::ReplyEmpty) {
-        let parent_path = match self.path_from_ino(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
+    async fn unlink(&self, _req: Request, parent: Inode, name: &OsStr) -> FuseResult<()> {
+        let parent_path = self
+            .path_from_ino(parent)
+            .ok_or_else(|| Errno::from(ENOENT))?;
 
         let child = name.to_string_lossy();
         let path = if parent_path == "/" {
@@ -724,16 +682,14 @@ impl AsyncFileSystem for JunkNasFs {
             format!("{}/{}", parent_path.trim_end_matches('/'), child)
         };
 
-        match self.delete_entry_in_controller(&path).await {
-            Ok(()) => {
-                self.cache.lock().unwrap().remove(&path);
-                reply.ok();
-            }
-            Err(_) => reply.error(EIO),
-        }
+        self.delete_entry_in_controller(&path)
+            .await
+            .map_err(|_| EIO)?;
+        self.cache.lock().unwrap().remove(&path);
+
+        Ok(())
     }
 }
-
 // ===========================================================
 // RUN FUSE
 // ===========================================================
@@ -746,13 +702,11 @@ pub async fn run_fuse(mountpoint: PathBuf, controller_url: String) -> Result<()>
 
     GLOBAL_FS.set(fs.clone()).ok();
 
-    let opts = MountOptions::default()
-        .mount_point(mountpoint)
-        .readonly(false)
-        .fs_name("junknas")
-        .auto_unmount();
+    let mut opts = MountOptions::default();
+    opts.fs_name("junknas");
+    let session = Session::new(opts);
 
-    fuse3::raw::mount(fs, opts).await?;
+    session.mount(fs, mountpoint).await?;
     Ok(())
 }
 
@@ -763,11 +717,7 @@ pub async fn run_fuse(mountpoint: PathBuf, controller_url: String) -> Result<()>
 fn get_cluster_state() -> ClusterState {
     use crate::agent_state::*;
 
-    let st = AGENT_STATE
-        .get()
-        .expect("agent state not initialized")
-        .lock()
-        .unwrap();
+    let st = AGENT_STATE.lock().unwrap();
 
     let mut nodes = Vec::new();
 

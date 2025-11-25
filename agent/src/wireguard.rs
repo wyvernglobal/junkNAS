@@ -1,6 +1,6 @@
-use std::process::{Command, Stdio};
-use std::io::{Read, Write};
 use anyhow::Result;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
 
 /// Launch boringtun in userspace.
 /// - Runs in "tun disabled" mode

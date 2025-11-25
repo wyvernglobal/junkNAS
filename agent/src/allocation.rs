@@ -1,7 +1,4 @@
-
 use anyhow::{anyhow, Result};
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
 
 use crate::fs_types::ChunkMeta;
 
@@ -43,7 +40,7 @@ pub struct ClusterState {
 // -----------------------------------------------------------
 
 pub fn allocate_chunk(
-    file_path: &str,
+    _file_path: &str,
     chunk_idx: u64,
     cluster: &ClusterState,
     content_hash: &str,
@@ -106,4 +103,3 @@ pub fn allocate_chunk(
         chunk_hash: content_hash.into(),
     })
 }
-

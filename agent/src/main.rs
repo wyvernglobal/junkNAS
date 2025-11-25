@@ -1,3 +1,5 @@
+mod agent_state;
+mod allocation;
 mod fs_types;
 mod fuse_daemon;
 mod mesh;
@@ -6,7 +8,6 @@ mod peers;
 mod transport;
 mod wireguard;
 
-use anyhow::Context;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -14,9 +15,7 @@ use std::{fs, net::SocketAddr, path::PathBuf, thread, time::Duration};
 use walkdir::WalkDir;
 
 use crate::mesh::PeerConnection;
-use crate::nat::{
-    compute_score, discover_public_endpoint, measure_controller_rtt, ConnectivityMode, NatType,
-};
+use crate::nat::{compute_score, discover_public_endpoint, measure_controller_rtt, NatType};
 use crate::peers::{fetch_mesh_info, MeshInfo};
 
 // -----------------------------------------------------------------------------
