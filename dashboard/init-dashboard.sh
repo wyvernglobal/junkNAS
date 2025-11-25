@@ -6,13 +6,13 @@ set -eu
 #
 # Rootless-safe entrypoint for the dashboard container.
 # - Generates a config.json used by the SPA.
-# - Serves static files on port 80 by default.
+# - Serves static files on port 8080 by default.
 # ------------------------------------------------------------
 
 DASHBOARD_DIR="${DASHBOARD_DIR:-/srv/junknas-dashboard}"
-PORT="${DASHBOARD_PORT:-80}"
+PORT="${DASHBOARD_PORT:-8080}"
 
-API_URL="${JUNKNAS_API_URL:-http://junknas-controller.junknas.svc.cluster.local/api}"
+API_URL="${JUNKNAS_API_URL:-http://junknas-controller.junknas-controller.pod.local:8088/api}"
 CLUSTER_NAME="${JUNKNAS_CLUSTER_NAME:-junkNAS}"
 POLL_INTERVAL="${JUNKNAS_POLL_INTERVAL:-5}"
 READONLY="${JUNKNAS_READONLY:-false}"
