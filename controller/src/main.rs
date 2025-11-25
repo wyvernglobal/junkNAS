@@ -265,6 +265,9 @@ async fn main() -> anyhow::Result<()> {
     let interface = wireguard::default_interface();
     wireguard::ensure_config_file(&interface)?;
 
+    ensure_controller_keypair(&state)?;
+    sync_wireguard_config(&state);
+
     // Build API routes
     let app = Router::new()
         .route("/api/nodes", get(list_nodes))
@@ -584,31 +587,20 @@ fn sync_wireguard_config(state: &SharedState) {
     }
 }
 
-fn alloc_samba_client_address(state: &mut ControllerState) -> Option<String> {
-    if state.samba_pool_end < state.samba_pool_start {
-        return None;
+fn ensure_controller_keypair(state: &SharedState) -> anyhow::Result<()> {
+    let node_id = env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".to_string());
+
+    let mut st = state.lock().unwrap();
+    if st.wg_keys.contains_key(&node_id) {
+        return Ok(());
     }
 
-    let pool_size = (state.samba_pool_end - state.samba_pool_start + 1) as usize;
-    let mut attempts = 0usize;
-    let mut octet = state.samba_next_octet;
+    let keypair = wireguard::generate_keypair(&node_id)?;
+    info!(
+        "Generated WireGuard keypair for controller node {}",
+        node_id
+    );
+    st.wg_keys.insert(node_id, keypair);
 
-    while attempts < pool_size {
-        let cidr = format!("{}/32", format!("{}.{}", state.samba_pool_prefix, octet));
-
-        state.samba_next_octet = if octet >= state.samba_pool_end {
-            state.samba_pool_start
-        } else {
-            octet + 1
-        };
-
-        if !state.samba_clients.contains_key(&cidr) {
-            return Some(cidr);
-        }
-
-        octet = state.samba_next_octet;
-        attempts += 1;
-    }
-
-    None
+    Ok(())
 }
