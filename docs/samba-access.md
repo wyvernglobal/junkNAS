@@ -1,13 +1,15 @@
 # Expose junkNAS over Samba via the WireGuard VLAN
 
-This guide describes how to make the junkNAS filesystem available to traditional SMB/Samba clients. The simplest approach is to run a **Samba sidecar** that sits next to the controller/agent, joins the WireGuard-backed junkNAS VLAN, mounts the filesystem locally, and exports it as a Samba share so any device that joins the WireGuard network can browse the NAS. The dashboard now exposes the WireGuard peer info (public-only) for this sidecar, plus a QR code and downloadable config stub to help clients join. Private keys for junkNAS remain hidden—only peer metadata is surfaced.
+This guide describes how to make the junkNAS filesystem available to traditional SMB/Samba clients. The controller now ships with Samba enabled so it can export the mounted cluster filesystem directly. The dashboard exposes controller WireGuard metadata and the **Connect via SAMBA** flow mints a fresh peer (with private key + address) so clients can join the overlay without reusing mesh credentials. Private keys for junkNAS remain hidden—only the dedicated Samba peer details are surfaced.
 
-The one-line installer now provisions this sidecar automatically (agent + Samba containers). It mounts the junkNAS filesystem, connects to the WireGuard mesh, and publishes the share on the overlay VLAN so clients can immediately connect. The dashboard generates a Samba-only WireGuard private key when you render a QR code or download the config so the junkNAS mesh private key stays reserved for syncing.
+The one-line installer now starts Samba inside the controller container. It mounts the junkNAS filesystem, connects to the WireGuard mesh, and publishes the share on the overlay VLAN so clients can immediately connect. The dashboard generates a Samba-only WireGuard private key when you render a QR code or download the config so the junkNAS mesh private key stays reserved for syncing.
 
 ## Prerequisites
 - A running junkNAS controller and at least one agent with data mounted at `/mnt/junknas`.
 - A host (VM, server, or laptop) that will act as the Samba gateway.
 - WireGuard and Samba installed on that host (for Debian/Ubuntu: `sudo apt install wireguard samba`).
+
+> **Note:** The controller container now runs Samba directly. You only need the dedicated gateway/sidecar approach below if you prefer to isolate the file-sharing surface from the controller.
 
 ## 1) Add the Samba host as a WireGuard peer (sidecar)
 1. Generate a keypair on the Samba host:

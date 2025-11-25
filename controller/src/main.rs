@@ -7,6 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    env,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
@@ -113,6 +114,27 @@ pub struct SambaHostState {
     pub mesh_port: Option<u16>,
     pub status: String,
 }
+
+#[derive(Debug, Clone)]
+pub struct SambaClientPeer {
+    pub public_key: String,
+    pub address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SambaClientConfig {
+    pub config: String,
+    pub address: String,
+    pub public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SambaGatewayMetadata {
+    pub endpoint: Option<String>,
+    pub allowed_ips: String,
+    pub dns: String,
+    pub controller_public_key: Option<String>,
+}
 /// Shared controller state across API handlers.
 #[derive(Debug)]
 pub struct ControllerState {
@@ -129,6 +151,27 @@ pub struct ControllerState {
 
     /// Samba hosts tracked separately.
     pub samba_hosts: HashMap<String, SambaHostState>,
+
+    /// Samba peers allocated by the controller (clients generated from dashboard).
+    pub samba_clients: HashMap<String, SambaClientPeer>,
+
+    /// Address allocation cursor for Samba peers.
+    pub samba_next_octet: u8,
+
+    /// Address pool start (inclusive).
+    pub samba_pool_start: u8,
+
+    /// Address pool end (inclusive).
+    pub samba_pool_end: u8,
+
+    /// IPv4 prefix for Samba peers, e.g. "10.44.0".
+    pub samba_pool_prefix: String,
+
+    /// DNS entry to hand back to Samba peers.
+    pub samba_client_dns: String,
+
+    /// AllowedIPs pushed to Samba peers.
+    pub samba_allowed_ips: String,
 }
 
 impl Default for ControllerState {
@@ -143,6 +186,25 @@ impl Default for ControllerState {
             wg_keys: HashMap::new(),
             fs_entries: HashMap::new(),
             samba_hosts: HashMap::new(),
+            samba_clients: HashMap::new(),
+            samba_next_octet: std::env::var("SAMBA_CLIENT_RANGE_START")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(80),
+            samba_pool_start: std::env::var("SAMBA_CLIENT_RANGE_START")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(80),
+            samba_pool_end: std::env::var("SAMBA_CLIENT_RANGE_END")
+                .ok()
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(110),
+            samba_pool_prefix: std::env::var("SAMBA_CLIENT_PREFIX")
+                .unwrap_or_else(|_| "10.44.0".into()),
+            samba_client_dns: std::env::var("SAMBA_CLIENT_DNS")
+                .unwrap_or_else(|_| "1.1.1.1".into()),
+            samba_allowed_ips: std::env::var("SAMBA_ALLOWED_IPS")
+                .unwrap_or_else(|_| "10.44.0.0/16".into()),
         };
 
         // Create root directory entry.
@@ -158,6 +220,27 @@ impl Default for ControllerState {
         };
 
         s.fs_entries.insert("/".into(), root);
+
+        // Track the controller as a Samba host so the dashboard can list it
+        // even before any heartbeats arrive.
+        let controller_node_id =
+            std::env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".into());
+        let controller_ip = std::env::var("WG_ADDRESS")
+            .ok()
+            .map(|v| v.split('/').next().unwrap_or(&v).to_string());
+        let controller_port = std::env::var("WG_LISTEN_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok());
+
+        s.samba_hosts.insert(
+            controller_node_id.clone(),
+            SambaHostState {
+                node_id: controller_node_id,
+                ip: controller_ip,
+                mesh_port: controller_port,
+                status: "online".into(),
+            },
+        );
         s
     }
 }
@@ -186,6 +269,11 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/nodes", get(list_nodes))
         .route("/api/samba-hosts", get(list_samba_hosts))
+        .route(
+            "/api/samba/client-config",
+            post(generate_samba_client_config),
+        )
+        .route("/api/samba/metadata", get(samba_metadata))
         .route("/api/agents/heartbeat", post(heartbeat))
         .route("/api/mesh", get(mesh_info))
         .route("/api/mesh/keys", get(list_wg_keys).post(upsert_wg_keys))
@@ -249,6 +337,72 @@ async fn list_samba_hosts(State(state): State<SharedState>) -> Json<Vec<SambaHos
     let st = state.lock().unwrap();
     let hosts: Vec<SambaHostState> = st.samba_hosts.values().cloned().collect();
     Json(hosts)
+}
+
+/// GET /api/samba/metadata
+/// Returns controller WireGuard metadata for Samba clients.
+async fn samba_metadata(State(state): State<SharedState>) -> Json<SambaGatewayMetadata> {
+    let st = state.lock().unwrap();
+    let controller_node_id = env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".into());
+    let controller_key = st
+        .wg_keys
+        .get(&controller_node_id)
+        .map(|k| k.public_key.clone());
+
+    Json(SambaGatewayMetadata {
+        endpoint: wireguard::controller_endpoint(&st),
+        allowed_ips: st.samba_allowed_ips.clone(),
+        dns: st.samba_client_dns.clone(),
+        controller_public_key: controller_key,
+    })
+}
+
+/// POST /api/samba/client-config
+/// Allocates a Samba WireGuard peer and returns a ready-to-use client config.
+async fn generate_samba_client_config(
+    State(state): State<SharedState>,
+) -> Result<Json<SambaClientConfig>, StatusCode> {
+    let mut st = state.lock().unwrap();
+    let controller_node_id = env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".into());
+    let controller_key = st
+        .wg_keys
+        .get(&controller_node_id)
+        .cloned()
+        .ok_or(StatusCode::PRECONDITION_FAILED)?;
+
+    let address = alloc_samba_client_address(&mut st).ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let (client_private, client_public) =
+        wireguard::generate_keypair().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    st.samba_clients.insert(
+        address.clone(),
+        SambaClientPeer {
+            public_key: client_public.clone(),
+            address: address.clone(),
+        },
+    );
+
+    let endpoint = wireguard::controller_endpoint(&st);
+    let allowed_ips = st.samba_allowed_ips.clone();
+    let dns = st.samba_client_dns.clone();
+
+    let config = wireguard::render_samba_client_config(
+        &client_private,
+        &address,
+        &dns,
+        &allowed_ips,
+        endpoint.as_deref(),
+        &controller_key.public_key,
+    );
+
+    drop(st);
+    sync_wireguard_config(&state);
+
+    Ok(Json(SambaClientConfig {
+        config,
+        address,
+        public_key: client_public,
+    }))
 }
 
 /// POST /api/agents/heartbeat
@@ -428,4 +582,33 @@ fn sync_wireguard_config(state: &SharedState) {
     } else {
         info!("WireGuard config generation skipped (no controller keypair)");
     }
+}
+
+fn alloc_samba_client_address(state: &mut ControllerState) -> Option<String> {
+    if state.samba_pool_end < state.samba_pool_start {
+        return None;
+    }
+
+    let pool_size = (state.samba_pool_end - state.samba_pool_start + 1) as usize;
+    let mut attempts = 0usize;
+    let mut octet = state.samba_next_octet;
+
+    while attempts < pool_size {
+        let cidr = format!("{}/32", format!("{}.{}", state.samba_pool_prefix, octet));
+
+        state.samba_next_octet = if octet >= state.samba_pool_end {
+            state.samba_pool_start
+        } else {
+            octet + 1
+        };
+
+        if !state.samba_clients.contains_key(&cidr) {
+            return Some(cidr);
+        }
+
+        octet = state.samba_next_octet;
+        attempts += 1;
+    }
+
+    None
 }
