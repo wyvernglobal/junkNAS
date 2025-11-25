@@ -375,7 +375,7 @@ async fn generate_samba_client_config(
 
     let address = alloc_samba_client_address(&mut st).ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let (client_private, client_public) =
-        wireguard::generate_keypair().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        wireguard::generate_ephemeral_keypair().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     st.samba_clients.insert(
         address.clone(),
@@ -406,6 +406,29 @@ async fn generate_samba_client_config(
         address,
         public_key: client_public,
     }))
+}
+
+fn alloc_samba_client_address(st: &mut ControllerState) -> Option<String> {
+    let start = st.samba_pool_start;
+    let end = st.samba_pool_end;
+
+    for _ in start..=end {
+        let octet = st.samba_next_octet;
+        st.samba_next_octet = if st.samba_next_octet >= end {
+            start
+        } else {
+            st.samba_next_octet + 1
+        };
+
+        let addr = format!("{}.{}", st.samba_pool_prefix, octet);
+        let cidr = format!("{}/32", addr);
+
+        if !st.samba_clients.contains_key(&cidr) {
+            return Some(cidr);
+        }
+    }
+
+    None
 }
 
 /// POST /api/agents/heartbeat

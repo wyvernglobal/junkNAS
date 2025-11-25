@@ -15,11 +15,7 @@ use crate::{ControllerState, MeshPeer, NodeState};
 
 /// Generates a new WireGuard keypair using x25519 and base64 encoding.
 pub fn generate_keypair(node_id: &str) -> Result<crate::WireGuardKeyPair> {
-    let secret = StaticSecret::random_from_rng(OsRng);
-    let public = PublicKey::from(&secret);
-
-    let private_key = STANDARD.encode(secret.to_bytes());
-    let public_key = STANDARD.encode(public.to_bytes());
+    let (private_key, public_key) = generate_ephemeral_keypair()?;
 
     Ok(crate::WireGuardKeyPair {
         node_id: node_id.to_string(),
@@ -35,24 +31,14 @@ pub struct RenderedConfig {
     pub contents: String,
 }
 
-pub fn generate_keypair() -> Result<(String, String)> {
-    let private = Command::new("wg").arg("genkey").output()?;
-    let private_key = String::from_utf8(private.stdout)?.trim().to_string();
+/// Generates a base64-encoded keypair without attaching metadata.
+pub fn generate_ephemeral_keypair() -> Result<(String, String)> {
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&secret);
 
-    let mut pubcmd = Command::new("wg");
-    pubcmd.arg("pubkey");
-    let mut child = pubcmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
+    let private_key = STANDARD.encode(secret.to_bytes());
+    let public_key = STANDARD.encode(public.to_bytes());
 
-    if let Some(stdin) = child.stdin.as_mut() {
-        use std::io::Write;
-        stdin.write_all(private_key.as_bytes())?;
-    }
-
-    let output = child.wait_with_output()?;
-    let public_key = String::from_utf8(output.stdout)?.trim().to_string();
     Ok((private_key, public_key))
 }
 
