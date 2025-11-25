@@ -700,9 +700,20 @@ pub async fn run_fuse(mountpoint: PathBuf, controller_url: String) -> Result<()>
 
     let fs = JunkNasFs::new(controller_url, node_id, base_dir);
 
-    if !Path::new("/dev/fuse").exists() {
+    let fuse_dev = Path::new("/dev/fuse");
+    if !fuse_dev.exists() {
         anyhow::bail!(
             "/dev/fuse missing; add --device /dev/fuse (rootless Podman) or enable privileged mode"
+        );
+    }
+
+    if let Err(e) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fuse_dev)
+    {
+        anyhow::bail!(
+            "unable to access /dev/fuse ({e}); grant rw to the device or run with --privileged"
         );
     }
 
