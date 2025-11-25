@@ -283,7 +283,13 @@ fn main() -> anyhow::Result<()> {
 
             // run async FUSE
             let rt = tokio::runtime::Runtime::new()?;
-            return rt.block_on(async { fuse_daemon::run_fuse(mountpoint, controller).await });
+            let result = rt.block_on(async { fuse_daemon::run_fuse(mountpoint, controller).await });
+
+            if let Err(err) = &result {
+                eprintln!("[agent] FUSE mount failed: {err:?}");
+            }
+
+            return result;
         }
     }
 
