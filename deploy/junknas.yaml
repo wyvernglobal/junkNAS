@@ -77,7 +77,8 @@ spec:
     - name: http
       port: 80
       targetPort: 80
-  type: ClusterIP
+      nodePort: 30080
+  type: NodePort
 ---
 # Rootless-safe agent deployment
 apiVersion: apps/v1
