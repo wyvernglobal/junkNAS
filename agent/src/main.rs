@@ -14,7 +14,9 @@ use serde_json::json;
 use std::{
     fs::{self, OpenOptions},
     net::{SocketAddr, UdpSocket},
+    os::unix::fs as unix_fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -71,6 +73,24 @@ struct AgentConfig {
     mesh_private_key: Option<String>,
     allocated_bytes: u64,
     drives: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LsblkOutput {
+    blockdevices: Vec<LsblkBlockDevice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LsblkBlockDevice {
+    name: String,
+    #[serde(default)]
+    mountpoint: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    children: Vec<LsblkBlockDevice>,
 }
 
 fn choose_controller_url() -> String {
@@ -672,28 +692,101 @@ fn drive_paths(base_dir: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
 
     fs::create_dir_all(base_dir)?;
 
-    for i in 0..3 {
-        fs::create_dir_all(base_dir.join(format!("drive{}", i)))?;
+    let mut mount_targets = match collect_lsblk_mounts() {
+        Ok(devs) => devs,
+        Err(err) => {
+            eprintln!(
+                "[agent] lsblk probe failed; using local fallback at {}: {:?}",
+                base_dir.display(),
+                err
+            );
+            Vec::new()
+        }
+    };
+    if mount_targets.is_empty() {
+        println!(
+            "[agent] lsblk reported no mounted drives; falling back to {}",
+            base_dir.display()
+        );
+        let fallback = base_dir.join("drive-fallback");
+        fs::create_dir_all(&fallback)?;
+        mount_targets.push(("drive-fallback".to_string(), fallback));
     }
 
-    for entry in fs::read_dir(base_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
+    for (id, target) in mount_targets {
+        let alias = base_dir.join(&id);
+
+        if alias.exists() {
+            let existing = alias.canonicalize().unwrap_or(alias.clone());
+            if existing != target {
+                if alias.is_dir() {
+                    fs::remove_dir_all(&alias)?;
+                } else {
+                    let _ = fs::remove_file(&alias);
+                }
+            }
         }
 
-        let id = entry.file_name().to_string_lossy().into_owned();
-        if !id.starts_with("drive") {
-            continue;
+        if !alias.exists() {
+            if alias == target {
+                fs::create_dir_all(&alias)?;
+            } else {
+                fs::create_dir_all(target.parent().unwrap_or(&target))?;
+                if let Err(err) = unix_fs::symlink(&target, &alias) {
+                    eprintln!(
+                        "[agent] unable to link drive {} to {}: {:?}",
+                        id,
+                        target.display(),
+                        err
+                    );
+                }
+            }
         }
 
-        drives.push((id, path));
+        drives.push((id, target));
     }
 
     drives.sort_by(|a, b| a.0.cmp(&b.0));
 
     Ok(drives)
+}
+
+fn collect_lsblk_mounts() -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let output = Command::new("lsblk")
+        .args(["-J", "-b", "-o", "NAME,MOUNTPOINT,SIZE,TYPE"])
+        .output()?;
+
+    if !output.status.success() {
+        anyhow::bail!("lsblk failed with status {}", output.status);
+    }
+
+    let parsed: LsblkOutput = serde_json::from_slice(&output.stdout)?;
+    let mut mounts = Vec::new();
+
+    fn walk(dev: &LsblkBlockDevice, acc: &mut Vec<(String, PathBuf)>) {
+        if dev.kind == "loop" {
+            return;
+        }
+
+        if let (Some(mp), Some(size)) = (&dev.mountpoint, dev.size) {
+            if !mp.is_empty() && size > 0 {
+                let id = format!("drive-{}", dev.name);
+                let data_root = PathBuf::from(mp).join("junknas");
+                let _ = fs::create_dir_all(&data_root);
+                acc.push((id, data_root));
+            }
+        }
+
+        for child in &dev.children {
+            walk(child, acc);
+        }
+    }
+
+    for dev in parsed.blockdevices {
+        walk(&dev, &mut mounts);
+    }
+
+    Ok(mounts)
 }
 
 fn drive_usage(path: &Path) -> anyhow::Result<(u64, u64)> {
@@ -720,17 +813,19 @@ fn drive_usage(path: &Path) -> anyhow::Result<(u64, u64)> {
 // -----------------------------------------------------------------------------
 
 fn apply_desired(base_dir: &PathBuf, desired: &HeartbeatResponse) -> anyhow::Result<()> {
-    if desired.eject {
-        println!("[agent] eject requested — clearing storage");
-        if base_dir.exists() {
-            fs::remove_dir_all(base_dir)?;
-        }
-        fs::create_dir_all(base_dir)?;
-        return Ok(());
-    }
-
     let drives = drive_paths(base_dir)?;
     let desired_bytes = desired.desired_allocation_bytes;
+
+    if desired.eject {
+        println!("[agent] eject requested — clearing storage");
+        for (_id, path) in &drives {
+            if path.exists() {
+                fs::remove_dir_all(path)?;
+            }
+            fs::create_dir_all(path)?;
+        }
+        return Ok(());
+    }
 
     if drives.is_empty() {
         println!("[agent] no drives discovered; skipping allocation");

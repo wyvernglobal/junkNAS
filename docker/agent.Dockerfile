@@ -11,7 +11,8 @@ RUN cargo build -p junknas-agent --release
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates wireguard-tools boringtun && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m junknas
