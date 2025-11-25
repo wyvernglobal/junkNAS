@@ -223,8 +223,8 @@
   </div>
 
   <div class="card" style="margin-top:16px;">
-    <h2>Samba sidecar access</h2>
-      <p class="helper">Expose junkNAS over SMB without leaking cluster private keys. The dashboard shows the WireGuard peer info for the Samba sidecar so you can sync agents and desktop clients. The dashboard will generate a dedicated WireGuard private key for Samba clients so you never have to reuse the junkNAS mesh key.</p>
+    <h2>Samba access (controller-hosted)</h2>
+      <p class="helper">The controller now runs the Samba share directly so peers can browse the cluster’s virtual filesystem. Use Connect via SAMBA to mint a WireGuard peer that targets the controller without exposing the junkNAS mesh private keys.</p>
     <div id="samba-card" class="hidden">
       <div class="mini-grid">
         <div>
@@ -249,7 +249,7 @@
         <button id="samba-connect">Connect via SAMBA</button>
       </div>
     </div>
-    <div id="samba-missing" class="helper">No Samba sidecar metadata found. Set JUNKNAS_SAMBA_* vars in init-dashboard.sh to surface the WireGuard peer.</div>
+    <div id="samba-missing" class="helper">No Samba metadata yet. Ensure the controller exposes a WireGuard endpoint and restart the dashboard.</div>
   </div>
 
   <div class="card" style="margin-top:16px;">
@@ -301,7 +301,7 @@
   <div id="samba-modal" class="modal hidden" role="dialog" aria-modal="true">
     <div class="modal-content">
       <h2>Connect via SAMBA</h2>
-      <p class="helper">Scan the QR code or download the WireGuard config for the Samba sidecar. The dashboard generates a fresh WireGuard private key for this config; do not reuse the junkNAS mesh private key for Samba access.</p>
+      <p class="helper">Scan the QR code or download the WireGuard config to connect straight to the controller’s Samba share. Each click generates a fresh peer with its own private key and address.</p>
       <div id="samba-qr"></div>
       <pre id="samba-config-block"></pre>
       <div class="modal-actions">

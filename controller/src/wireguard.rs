@@ -16,6 +16,86 @@ pub struct RenderedConfig {
     pub contents: String,
 }
 
+pub fn generate_keypair() -> Result<(String, String)> {
+    let private = Command::new("wg").arg("genkey").output()?;
+    let private_key = String::from_utf8(private.stdout)?.trim().to_string();
+
+    let mut pubcmd = Command::new("wg");
+    pubcmd.arg("pubkey");
+    let mut child = pubcmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin.write_all(private_key.as_bytes())?;
+    }
+
+    let output = child.wait_with_output()?;
+    let public_key = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok((private_key, public_key))
+}
+
+pub fn controller_endpoint(state: &ControllerState) -> Option<String> {
+    let controller_node_id =
+        env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".to_string());
+
+    if let Ok(ep) = env::var("JUNKNAS_SAMBA_ENDPOINT") {
+        return Some(ep);
+    }
+
+    if let Ok(ep) = env::var("WG_ENDPOINT_OVERRIDE") {
+        return Some(ep);
+    }
+
+    if let Some(node) = state.nodes.get(&controller_node_id) {
+        if let Some(ep) = &node.mesh_endpoint {
+            return Some(ep.clone());
+        }
+
+        if let (Some(ip), Some(port)) = (node.ip.as_ref(), node.mesh_port) {
+            return Some(format_endpoint(ip, port));
+        }
+    }
+
+    if let Ok(ip) = env::var("WG_ADDRESS") {
+        let addr = ip.split('/').next().unwrap_or(&ip);
+        let port = env::var("WG_LISTEN_PORT")
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(51820);
+        return Some(format_endpoint(addr, port));
+    }
+
+    None
+}
+
+pub fn render_samba_client_config(
+    private_key: &str,
+    address_cidr: &str,
+    dns: &str,
+    allowed_ips: &str,
+    endpoint: Option<&str>,
+    server_public_key: &str,
+) -> String {
+    let mut lines = vec!["[Interface]".to_string()];
+    lines.push(format!("PrivateKey = {}", private_key));
+    lines.push(format!("Address = {}", address_cidr));
+    lines.push(format!("DNS = {}", dns));
+
+    lines.push(String::new());
+    lines.push("[Peer]".to_string());
+    lines.push(format!("PublicKey = {}", server_public_key));
+    lines.push(format!("AllowedIPs = {}", allowed_ips));
+    if let Some(ep) = endpoint {
+        lines.push(format!("Endpoint = {}", ep));
+        lines.push("PersistentKeepalive = 25".to_string());
+    }
+
+    lines.join("\n") + "\n"
+}
+
 /// Builds a WireGuard server config for the controller using in-memory state.
 ///
 /// The controller node id defaults to `controller` but can be overridden with
@@ -90,6 +170,13 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
             lines.push(format!("Endpoint = {}", ep));
             lines.push("PersistentKeepalive = 25".to_string());
         }
+    }
+
+    for client in state.samba_clients.values() {
+        lines.push(String::new());
+        lines.push("[Peer]".to_string());
+        lines.push(format!("PublicKey = {}", client.public_key));
+        lines.push(format!("AllowedIPs = {}", client.address));
     }
 
     let contents = lines.join("\n") + "\n";
