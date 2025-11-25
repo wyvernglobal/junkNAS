@@ -198,7 +198,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: JUNKNAS_API_URL
-              value: "http://junknas-controller.junknas.svc.cluster.local:8080/api"
+              value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
             - name: JUNKNAS_SAMBA_ENABLED
               value: "true"
             - name: JUNKNAS_SAMBA_PUBLIC_KEY
@@ -249,7 +249,7 @@ spec:
           image: ghcr.io/junknas/agent:latest
           env:
             - name: JUNKNAS_CONTROLLER_URL
-              value: "http://junknas-controller.junknas.svc.cluster.local:8080/api"
+              value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -273,7 +273,7 @@ spec:
           args: ["mount", "/mnt/junknas"]
           env:
             - name: JUNKNAS_CONTROLLER_URL
-              value: "http://junknas-controller.junknas.svc.cluster.local:8080/api"
+              value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
           securityContext:
             privileged: true
             capabilities:

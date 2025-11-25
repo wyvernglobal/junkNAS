@@ -27,8 +27,8 @@ pub fn run_mesh(_private_key: String, peers: Vec<PeerConnection>, port: u16) -> 
     let _ = GLOBAL_TRANSPORT.set(transport);
 
     // Bring up rootless WireGuard tunnel via boringtun so packet handling stays in userspace.
-    let tunnel = ROOTLESS_TUNNEL
-        .get_or_try_init(|| WGTunnel::start(&_private_key).map(Mutex::new))?;
+    let tunnel =
+        ROOTLESS_TUNNEL.get_or_try_init(|| WGTunnel::start(&_private_key).map(Mutex::new))?;
 
     let store = ACTIVE_PEERS.get_or_init(|| Mutex::new(Vec::new()));
     *store.lock().unwrap() = peers.clone();

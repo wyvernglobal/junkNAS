@@ -19,7 +19,7 @@ pub struct MeshInfo {
 
 /// Fetch /api/mesh from controller.
 ///
-/// controller_url: "http://junknas-controller.junknas.svc.cluster.local/api"
+/// controller_url: reachable via the WireGuard overlay, e.g. "http://10.44.0.1:8080/api"
 pub fn fetch_mesh_info(controller_url: &str) -> Result<MeshInfo> {
     let client = Client::new();
     let url = format!("{}/mesh", controller_url.trim_end_matches('/'));
