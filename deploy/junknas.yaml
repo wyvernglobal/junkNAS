@@ -87,6 +87,10 @@ spec:
           env:
             - name: JUNKNAS_CONTROLLER_URL
               value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
+          devices:
+            - containerPath: /dev/fuse
+              hostPath: /dev/fuse
+              permissions: "rwm"
 
 ---
 apiVersion: apps/v1
@@ -112,13 +116,15 @@ spec:
           env:
             - name: JUNKNAS_CONTROLLER_URL
               value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
+          devices:
+            - containerPath: /dev/fuse
+              hostPath: /dev/fuse
+              permissions: "rwm"
           securityContext:
             privileged: true
             capabilities:
               add: ["SYS_ADMIN"]
           volumeMounts:
-            - name: fuse
-              mountPath: /dev/fuse
             - name: junknas-data
               mountPath: /var/lib/junknas
             - name: junknas-mnt
@@ -138,9 +144,6 @@ spec:
             - name: junknas-mnt
               mountPath: /srv/junknas
       volumes:
-        - name: fuse
-          hostPath:
-            path: /dev/fuse
         - name: junknas-data
           emptyDir: {}
         - name: junknas-mnt
