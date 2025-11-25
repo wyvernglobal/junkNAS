@@ -13,6 +13,14 @@ impl OverlayTransport {
         Ok(Self { socket: sock })
     }
 
+    /// Return the local port the transport is bound to.
+    pub fn local_port(&self) -> u16 {
+        self.socket
+            .local_addr()
+            .map(|addr| addr.port())
+            .unwrap_or(0)
+    }
+
     /// Send a packet to a peer.
     pub fn send(&self, peer: SocketAddr, data: &[u8]) -> Result<()> {
         self.socket.send_to(data, peer)?;
