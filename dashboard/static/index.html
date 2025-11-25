@@ -1,62 +1,162 @@
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8">
-<title>junkNAS Dashboard</title>
-<style>
+  <meta charset="UTF-8">
+  <title>junkNAS Dashboard</title>
+  <style>
     body {
-        font-family: Arial, sans-serif;
-        background: #111;
-        color: #eee;
-        margin: 20px;
+      font-family: Arial, sans-serif;
+      background: #0f1115;
+      color: #f2f5f8;
+      margin: 20px;
     }
-    h1, h2 {
-        margin: 0;
-        padding: 0;
+    h1, h2, h3 {
+      margin: 0;
+      padding: 0;
     }
     #subtitle {
-        color: #aaa;
-        margin-bottom: 1rem;
+      color: #97a0ad;
+      margin-bottom: 1rem;
     }
     table {
-        border-collapse: collapse;
-        width: 100%;
-        margin-top: 1rem;
-        background: #1b1b1b;
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 1rem;
+      background: #151821;
+      border: 1px solid #1f2430;
     }
     th, td {
-        border: 1px solid #333;
-        padding: 8px;
+      border: 1px solid #1f2430;
+      padding: 10px;
+      vertical-align: top;
     }
     th {
-        background: #222;
+      background: #1d2230;
+      text-align: left;
     }
     tr:nth-child(even) {
-        background: #181818;
+      background: #131722;
     }
     button {
-        background: #444;
-        border: 1px solid #666;
-        color: #eee;
-        padding: 4px 8px;
-        cursor: pointer;
+      background: #2b3245;
+      border: 1px solid #3b4356;
+      color: #e9eef7;
+      padding: 6px 10px;
+      cursor: pointer;
+      border-radius: 4px;
     }
     button:hover {
-        background: #555;
+      background: #3a4259;
     }
     pre {
-        white-space: pre-wrap;
+      white-space: pre-wrap;
+      margin: 0;
     }
-</style>
+    .grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 2fr 1fr;
+      align-items: start;
+    }
+    .card {
+      background: #121620;
+      border: 1px solid #1f2430;
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+    }
+    .card h2 {
+      margin-bottom: 8px;
+    }
+    #nat-map {
+      line-height: 1.6;
+    }
+    #setup-banner {
+      background: #1f2a3a;
+      border: 1px solid #3a4b65;
+      padding: 10px 12px;
+      border-radius: 6px;
+      margin-top: 12px;
+      margin-bottom: -4px;
+      display: inline-block;
+    }
+    #setup-banner.hidden {
+      display: none;
+    }
+    #setup-status, #merge-status {
+      margin-top: 10px;
+      color: #a9b5c5;
+    }
+    #merge-status.error {
+      color: #f4a261;
+    }
+    .modal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+    }
+    .modal.hidden {
+      display: none;
+    }
+    .modal-content {
+      background: #0f1420;
+      border: 1px solid #2c3547;
+      border-radius: 8px;
+      padding: 20px;
+      width: 420px;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+    }
+    .modal-content label {
+      display: block;
+      margin-top: 12px;
+      font-weight: bold;
+    }
+    .modal-content input, .modal-content textarea, .merge-form textarea, .merge-form input {
+      width: 100%;
+      background: #161b29;
+      border: 1px solid #2c3547;
+      border-radius: 6px;
+      color: #e9eef7;
+      padding: 8px;
+      margin-top: 6px;
+    }
+    .modal-actions {
+      margin-top: 16px;
+      text-align: right;
+    }
+    .modal-actions button:first-child {
+      margin-right: 8px;
+    }
+    .merge-form textarea {
+      min-height: 140px;
+      resize: vertical;
+    }
+    .helper {
+      color: #8d97a8;
+      font-size: 0.9rem;
+    }
+  </style>
 </head>
 <body>
+  <h1 id="title">junkNAS</h1>
+  <div id="subtitle">Loading…</div>
 
-<h1 id="title">junkNAS</h1>
-<div id="subtitle">Loading…</div>
+  <div id="setup-banner" class="hidden"></div>
+  <div id="setup-status"></div>
 
-<table id="nodes-table">
-    <thead>
-        <tr>
+  <div class="grid">
+    <div class="card">
+      <h2>Devices in cluster</h2>
+      <table id="nodes-table">
+        <thead>
+          <tr>
             <th>Node ID</th>
             <th>Hostname</th>
             <th>Nickname</th>
@@ -65,109 +165,51 @@
             <th>Mesh Score</th>
             <th>Drives</th>
             <th>Total Used</th>
+            <th>Plan</th>
             <th>Actions</th>
-        </tr>
-    </thead>
-    <tbody id="nodes-body"></tbody>
-</table>
+          </tr>
+        </thead>
+        <tbody id="nodes-body"></tbody>
+      </table>
+    </div>
 
-<div id="nat-map" style="margin-top:2rem; font-size:1rem;"></div>
+    <div class="card">
+      <div id="nat-map"></div>
+    </div>
+  </div>
 
-<script>
-let config = null;
-let readonly = false;
+  <div class="card" style="margin-top:16px;">
+    <h2>Cluster utilities</h2>
+    <div class="merge-form">
+      <h3>Merge junkNAS cluster</h3>
+      <p class="helper">Paste a WireGuard configuration from the cluster you want to sync with. The dashboard will capture it so the device can join the chosen junkNAS cluster.</p>
+      <label for="merge-cluster-name">Target cluster name</label>
+      <input id="merge-cluster-name" placeholder="e.g. west-coast-lab" />
+      <label for="merge-config">WireGuard config</label>
+      <textarea id="merge-config" placeholder="[Interface]\nPrivateKey=...\n[Peer]\nPublicKey=...\nEndpoint=..."></textarea>
+      <div style="margin-top:12px; text-align:right;">
+        <button id="merge-submit">Merge into cluster</button>
+      </div>
+      <div id="merge-status"></div>
+    </div>
+  </div>
 
-function fmtBytes(b) {
-    const u = ["B","KB","MB","GB","TB"];
-    let i = 0;
-    let v = b;
-    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-    return v.toFixed(1) + " " + u[i];
-}
+  <div id="setup-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2>Set up new device</h2>
+      <p id="setup-device-label" class="helper"></p>
+      <label for="setup-nickname">Nickname</label>
+      <input id="setup-nickname" placeholder="Backup NAS, Garage node, ..." />
+      <label for="setup-allocation">Space allocation (GB)</label>
+      <input id="setup-allocation" type="number" min="1" step="1" />
+      <p class="helper">This dashboard stores your plan locally and reminds you when new devices appear.</p>
+      <div class="modal-actions">
+        <button id="setup-skip">Skip</button>
+        <button id="setup-save">Save plan</button>
+      </div>
+    </div>
+  </div>
 
-async function loadConfig() {
-    const res = await fetch("config.json");
-    config = await res.json();
-    readonly = !!config.readonly;
-    document.getElementById("title").innerText = config.clusterName || "junkNAS";
-    document.getElementById("subtitle").innerText =
-        `API: ${config.apiBaseUrl} · Poll ${config.pollIntervalSeconds}s`;
-}
-
-async function fetchNodes() {
-    const res = await fetch(config.apiBaseUrl + "/nodes");
-    const nodes = await res.json();
-    renderNodes(nodes);
-    renderNatMap(nodes);
-}
-
-function renderNodes(nodes) {
-    const tbody = document.getElementById("nodes-body");
-    tbody.innerHTML = "";
-
-    nodes.forEach(node => {
-        const tr = document.createElement("tr");
-
-        const drivesText = (node.drives || [])
-            .map(d => `${d.id}: ${fmtBytes(d.used_bytes)} / ${fmtBytes(d.allocated_bytes)}`)
-            .join("\n");
-
-        const totalUsed = (node.drives || [])
-            .reduce((sum, d) => sum + d.used_bytes, 0);
-
-        tr.innerHTML = `
-            <td>${node.node_id}</td>
-            <td>${node.hostname}</td>
-            <td>${node.nickname}</td>
-            <td>${node.mesh_nat_type || "unknown"}</td>
-            <td>${node.mesh_endpoint || "n/a"}</td>
-            <td>${node.mesh_score != null ? node.mesh_score.toFixed(3) : "n/a"}</td>
-            <td><pre>${drivesText}</pre></td>
-            <td>${fmtBytes(totalUsed)}</td>
-            <td class="actions"></td>
-        `;
-
-        const td = tr.querySelector(".actions");
-
-        if (readonly) {
-            td.innerText = "readonly";
-        } else {
-            const btnAlloc = document.createElement("button");
-            btnAlloc.innerText = "+1GB";
-            btnAlloc.onclick = () => alert("TODO: allocate 1GB for " + node.node_id);
-
-            const btnEject = document.createElement("button");
-            btnEject.innerText = "Eject";
-            btnEject.style.marginLeft = "6px";
-            btnEject.onclick = () => alert("TODO: eject " + node.node_id);
-
-            td.appendChild(btnAlloc);
-            td.appendChild(btnEject);
-        }
-
-        tbody.appendChild(tr);
-    });
-}
-
-function renderNatMap(nodes) {
-    const mapDiv = document.getElementById("nat-map");
-    let html = "<h2>NAT Map</h2>";
-    if (nodes.length === 0) {
-        html += "No nodes.";
-    } else {
-        html += nodes.map(n => {
-            return `${n.node_id} → NAT=${n.mesh_nat_type || "unknown"}, score=${n.mesh_score != null ? n.mesh_score.toFixed(3) : "n/a"}`;
-        }).join("<br/>");
-    }
-    mapDiv.innerHTML = html;
-}
-
-(async function main() {
-    await loadConfig();
-    await fetchNodes();
-    setInterval(fetchNodes, (config.pollIntervalSeconds || 5) * 1000);
-})();
-</script>
-
+  <script src="app.js"></script>
 </body>
 </html>
