@@ -11,7 +11,13 @@ mod wireguard;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{fs, net::SocketAddr, path::PathBuf, thread, time::Duration};
+use std::{
+    fs::{self, OpenOptions},
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 use walkdir::WalkDir;
 
 use crate::mesh::PeerConnection;
@@ -296,6 +302,25 @@ fn main() -> anyhow::Result<()> {
 fn discover_drives(base_dir: &PathBuf) -> anyhow::Result<Vec<DriveReport>> {
     let mut drives = Vec::new();
 
+    for (id, path) in drive_paths(base_dir)? {
+        let (data_bytes, reserved_bytes) = drive_usage(&path)?;
+
+        drives.push(DriveReport {
+            id,
+            path: path.display().to_string(),
+            used_bytes: data_bytes,
+            allocated_bytes: data_bytes + reserved_bytes,
+        });
+    }
+
+    Ok(drives)
+}
+
+fn drive_paths(base_dir: &Path) -> anyhow::Result<Vec<(String, PathBuf)>> {
+    let mut drives = Vec::new();
+
+    fs::create_dir_all(base_dir)?;
+
     for i in 0..3 {
         fs::create_dir_all(base_dir.join(format!("drive{}", i)))?;
     }
@@ -308,28 +333,35 @@ fn discover_drives(base_dir: &PathBuf) -> anyhow::Result<Vec<DriveReport>> {
         }
 
         let id = entry.file_name().to_string_lossy().into_owned();
-        let used = folder_size(&path)?;
+        if !id.starts_with("drive") {
+            continue;
+        }
 
-        drives.push(DriveReport {
-            id,
-            path: path.display().to_string(),
-            used_bytes: used,
-            allocated_bytes: used,
-        });
+        drives.push((id, path));
     }
+
+    drives.sort_by(|a, b| a.0.cmp(&b.0));
 
     Ok(drives)
 }
 
-fn folder_size(path: &PathBuf) -> anyhow::Result<u64> {
-    let mut size = 0;
+fn drive_usage(path: &Path) -> anyhow::Result<(u64, u64)> {
+    let mut data_bytes = 0;
+    let mut reserved_bytes = 0;
+
     for entry in WalkDir::new(path) {
         let entry = entry?;
         if entry.file_type().is_file() {
-            size += entry.metadata()?.len();
+            let len = entry.metadata()?.len();
+            if entry.file_name() == ".allocation" {
+                reserved_bytes += len;
+            } else {
+                data_bytes += len;
+            }
         }
     }
-    Ok(size)
+
+    Ok((data_bytes, reserved_bytes))
 }
 
 // -----------------------------------------------------------------------------
@@ -346,10 +378,44 @@ fn apply_desired(base_dir: &PathBuf, desired: &HeartbeatResponse) -> anyhow::Res
         return Ok(());
     }
 
-    println!(
-        "[agent] desired allocation = {} (TODO implement allocator)",
-        desired.desired_allocation_bytes
-    );
+    let drives = drive_paths(base_dir)?;
+    let desired_bytes = desired.desired_allocation_bytes;
+
+    if drives.is_empty() {
+        println!("[agent] no drives discovered; skipping allocation");
+    } else {
+        let per_drive = desired_bytes / drives.len() as u64;
+        let remainder = desired_bytes % drives.len() as u64;
+
+        for (idx, (id, path)) in drives.iter().enumerate() {
+            let (data_bytes, reserved_bytes) = drive_usage(path)?;
+
+            let mut target_total = per_drive;
+            if (idx as u64) < remainder {
+                target_total += 1;
+            }
+
+            if target_total < data_bytes {
+                target_total = data_bytes;
+            }
+
+            let target_reserved = target_total.saturating_sub(data_bytes);
+            let reserved_path = path.join(".allocation");
+
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&reserved_path)?;
+            file.set_len(target_reserved)?;
+
+            if reserved_bytes != target_reserved {
+                println!(
+                    "[agent] drive {} reservation {} → {} bytes (data {})",
+                    id, reserved_bytes, target_reserved, data_bytes
+                );
+            }
+        }
+    }
 
     if let (Some(public), Some(private)) = (&desired.mesh_public_key, &desired.mesh_private_key) {
         let mesh_dir = base_dir.join("mesh");
