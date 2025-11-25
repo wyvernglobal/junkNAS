@@ -23,8 +23,19 @@ static ROOTLESS_TUNNEL: OnceCell<Mutex<WGTunnel>> = OnceCell::new();
 
 /// Initialize global transport and remember current peers.
 pub fn run_mesh(_private_key: String, peers: Vec<PeerConnection>, port: u16) -> Result<()> {
-    let transport = OverlayTransport::bind(port)?;
-    let _ = GLOBAL_TRANSPORT.set(transport);
+    let transport = GLOBAL_TRANSPORT.get_or_try_init(|| OverlayTransport::bind(port))?;
+
+    // If the existing transport was bound on a different port, surface a clear error
+    // instead of repeatedly attempting (and failing) to bind the socket on every mesh
+    // poll iteration. This avoids the noisy "Address already in use" log spam seen when
+    // the mesh thread reconfigures peers.
+    if transport.local_port() != port {
+        return Err(anyhow!(
+            "mesh transport already bound on {}; cannot rebind to {}",
+            transport.local_port(),
+            port
+        ));
+    }
 
     // Bring up rootless WireGuard tunnel via boringtun so packet handling stays in userspace.
     let tunnel =
