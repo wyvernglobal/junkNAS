@@ -49,7 +49,7 @@ spec:
             - name: JUNKNAS_API_URL
               value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
             - name: JUNKNAS_SAMBA_ENABLED
-              value: "true"
+              value: "false"
             - name: JUNKNAS_SAMBA_PUBLIC_KEY
               value: "samba-sidecar-public-key"
             - name: JUNKNAS_SAMBA_ENDPOINT
@@ -87,10 +87,24 @@ spec:
           env:
             - name: JUNKNAS_CONTROLLER_URL
               value: "http://10.44.0.1:8080/api"  # WireGuard overlay endpoint
+            - name: JUNKNAS_AGENT_ROLE
+              value: "pure"
           devices:
             - containerPath: /dev/fuse
               hostPath: /dev/fuse
               permissions: "rwm"
+          volumeMounts:
+            - name: junknas-agent-data
+              mountPath: /root/.local/share/junknas
+            - name: junknas-agent-config
+              mountPath: /root/.junknas
+      volumes:
+        - name: junknas-agent-data
+          persistentVolumeClaim:
+            claimName: junknas-agent-data
+        - name: junknas-agent-config
+          persistentVolumeClaim:
+            claimName: junknas-agent-config
 
 ---
 apiVersion: apps/v1
@@ -99,7 +113,7 @@ metadata:
   name: junknas-samba
   namespace: junknas
 spec:
-  replicas: 1
+  replicas: 0  # temporarily disable samba sidecar while focusing on pure agents
   selector:
     matchLabels:
       app: junknas-samba
@@ -148,6 +162,32 @@ spec:
           emptyDir: {}
         - name: junknas-mnt
           emptyDir: {}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: junknas-agent-data
+  namespace: junknas
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: junknas-agent-config
+  namespace: junknas
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 
 ---
 apiVersion: v1
