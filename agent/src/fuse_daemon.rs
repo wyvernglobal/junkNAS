@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -699,6 +699,23 @@ pub async fn run_fuse(mountpoint: PathBuf, controller_url: String) -> Result<()>
     let base_dir = dirs::data_local_dir().unwrap().join("junknas/storage");
 
     let fs = JunkNasFs::new(controller_url, node_id, base_dir);
+
+    let fuse_dev = Path::new("/dev/fuse");
+    if !fuse_dev.exists() {
+        anyhow::bail!(
+            "/dev/fuse missing; add --device /dev/fuse (rootless Podman) or enable privileged mode"
+        );
+    }
+
+    if let Err(e) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fuse_dev)
+    {
+        anyhow::bail!(
+            "unable to access /dev/fuse ({e}); grant rw to the device or run with --privileged"
+        );
+    }
 
     if let Err(e) = fs.create_file_in_controller("/.junknas_alive", 0o644).await {
         eprintln!("[fuse] unable to ensure controller keepalive file: {e:?}");
