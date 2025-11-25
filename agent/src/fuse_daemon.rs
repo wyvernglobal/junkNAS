@@ -700,6 +700,10 @@ pub async fn run_fuse(mountpoint: PathBuf, controller_url: String) -> Result<()>
 
     let fs = JunkNasFs::new(controller_url, node_id, base_dir);
 
+    if let Err(e) = fs.create_file_in_controller("/.junknas_alive", 0o644).await {
+        eprintln!("[fuse] unable to ensure controller keepalive file: {e:?}");
+    }
+
     GLOBAL_FS.set(fs.clone()).ok();
 
     let mut opts = MountOptions::default();
