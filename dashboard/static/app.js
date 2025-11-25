@@ -4,6 +4,7 @@
 let config = null;
 let readonly = false;
 let lastNodes = [];
+let lastSambaHosts = [];
 let sambaGateway = null;
 let sambaClientPrivateKey = null;
 
@@ -46,10 +47,14 @@ async function loadConfig() {
 async function fetchNodes() {
   const res = await fetch(config.apiBaseUrl + "/nodes");
   const nodes = await res.json();
+  const sambaRes = await fetch(config.apiBaseUrl + "/samba-hosts");
+  const sambaHosts = await sambaRes.json();
   lastNodes = nodes;
+  lastSambaHosts = sambaHosts;
   renderNodes(nodes);
   renderNatMap(nodes);
   enqueueNewNodes(nodes);
+  renderSambaHosts(sambaHosts);
 }
 
 function renderSambaCard() {
@@ -175,6 +180,7 @@ function renderNodes(nodes) {
       0
     );
 
+    const isNew = !knownNodeIds.has(node.node_id);
     const drivesText = (node.drives || [])
       .map(
         (d) =>
@@ -186,9 +192,13 @@ function renderNodes(nodes) {
 
     const plan = setupPlans[node.node_id];
     const displayNickname = plan?.nickname || node.nickname || "New device";
-    const planText = plan
+    let planText = plan
       ? `${plan.allocationGb} GB planned`
       : "Awaiting setup";
+
+    if (isNew && !plan) {
+      planText = "New agent detected";
+    }
 
     const natType = node.mesh_nat_type || "unknown";
     const meshEndpoint = node.mesh_endpoint || "n/a";
@@ -211,6 +221,14 @@ function renderNodes(nodes) {
     if (readonly) {
       actionsTd.innerText = "readonly";
     } else {
+      if (isNew) {
+        const setupBtn = document.createElement("button");
+        setupBtn.innerText = "Setup";
+        setupBtn.onclick = () => startSetupFor(node);
+        actionsTd.appendChild(setupBtn);
+        actionsTd.appendChild(document.createTextNode(" "));
+      }
+
       const btnAlloc = document.createElement("button");
       btnAlloc.innerText = "+1GB";
       btnAlloc.onclick = () => alert("TODO: allocate for " + node.node_id);
@@ -248,6 +266,29 @@ function renderNatMap(nodes) {
   natDiv.innerHTML = html;
 }
 
+function renderSambaHosts(hosts) {
+  const tbody = document.getElementById("samba-hosts-body");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  if (!hosts.length) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="3" class="helper">No Samba hosts reported</td>';
+    tbody.appendChild(tr);
+    return;
+  }
+
+  hosts.forEach((host) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${host.ip || "unknown"}</td>
+      <td>${host.mesh_port || "n/a"}</td>
+      <td>${host.status || "unknown"}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
 function persistSetupPlans() {
   localStorage.setItem("junknasSetupPlans", JSON.stringify(setupPlans));
 }
@@ -280,7 +321,10 @@ function updateSetupBanner() {
     banner.innerText = "";
   } else {
     banner.classList.remove("hidden");
-    banner.innerText = `${count} new device${count === 1 ? "" : "s"} waiting for setup`;
+    banner.innerText =
+      count === 1
+        ? "New agent detected. Click Setup to configure."
+        : `${count} new devices waiting for setup`;
   }
 }
 
@@ -295,6 +339,11 @@ function openSetupModal(node) {
   deviceLabel.innerText = `${node.hostname || "New host"} (${node.node_id})`;
 
   modal.classList.remove("hidden");
+}
+
+function startSetupFor(node) {
+  activeSetupNode = node;
+  openSetupModal(node);
 }
 
 function closeSetupModal() {
