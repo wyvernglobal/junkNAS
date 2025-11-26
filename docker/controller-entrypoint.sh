@@ -35,7 +35,7 @@ export DASHBOARD_DIR
 
 # Default to IPv6 overlay advertising to avoid clashing RFC1918 subnets.
 export WG_ADDRESS_V6="${WG_ADDRESS_V6:-fd44::1/64}"
-export WG_ENDPOINT_PORT="${WG_ENDPOINT_PORT:-65535}"
+export WG_ENDPOINT_PORT="${WG_ENDPOINT_PORT:-58008}"
 
 if [ -f "$WG_CONF" ]; then
   if wg show "$WG_IFACE" >/dev/null 2>&1; then

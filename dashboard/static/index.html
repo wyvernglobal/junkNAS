@@ -269,16 +269,12 @@
   <div class="card" style="margin-top:16px;">
     <h2>Cluster utilities</h2>
     <div class="merge-form">
-      <h3>Merge junkNAS cluster</h3>
-      <p class="helper">Paste a WireGuard configuration from the cluster you want to sync with. The dashboard will capture it so the device can join the chosen junkNAS cluster.</p>
-      <label for="merge-cluster-name">Target cluster name</label>
-      <input id="merge-cluster-name" placeholder="e.g. west-coast-lab" />
-      <label for="merge-config">WireGuard config</label>
-      <textarea id="merge-config" placeholder="[Interface]\nPrivateKey=...\n[Peer]\nPublicKey=...\nEndpoint=..."></textarea>
+      <h3>Mesh sync</h3>
+      <p class="helper">Start a mesh sync without pasting WireGuard configs. Provide the peer’s IP and choose the master controller to drive the sync.</p>
       <div style="margin-top:12px; text-align:right;">
-        <button id="merge-submit">Merge into cluster</button>
+        <button id="mesh-sync-open">Start mesh sync</button>
       </div>
-      <div id="merge-status"></div>
+      <div id="mesh-sync-status"></div>
     </div>
   </div>
 
@@ -307,6 +303,23 @@
       <div class="modal-actions">
         <button id="samba-download">Download config file</button>
         <button id="samba-close">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mesh-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h2>Mesh sync</h2>
+      <p class="helper">Enter the peer IP and pick the master controller to coordinate the sync.</p>
+      <label for="mesh-ip">Peer IP</label>
+      <input id="mesh-ip" placeholder="192.0.2.10" />
+      <label for="mesh-controller">Master controller</label>
+      <select id="mesh-controller"></select>
+      <p class="helper">The dashboard will contact the controller locally (localhost:8088) to kick off the sync.</p>
+      <div id="mesh-modal-status" class="helper"></div>
+      <div class="modal-actions">
+        <button id="mesh-cancel">Cancel</button>
+        <button id="mesh-submit">Begin sync</button>
       </div>
     </div>
   </div>

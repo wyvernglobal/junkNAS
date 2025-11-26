@@ -31,7 +31,7 @@ spec:
             - containerPort: 8080
               hostPort: 8080   # serve dashboard on host:8080
             - containerPort: 51820
-              hostPort: 65535  # publish WireGuard on host:65535/udp (80085 requested but above port limit)
+              hostPort: 58008  # publish WireGuard on host:58008/udp (80085 requested but above port limit)
             - containerPort: 445
           volumeMounts:
             - name: junknas-wireguard
@@ -43,7 +43,7 @@ spec:
             - name: JUNKNAS_API_PUBLIC_PORT
               value: "8088"
             - name: WG_ENDPOINT_PORT
-              value: "65535"
+              value: "58008"
             - name: WG_ADDRESS_V6
               value: "fd44::1/64"
             - name: SAMBA_CLIENT_PREFIX
