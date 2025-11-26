@@ -31,5 +31,4 @@ COPY docker/controller-entrypoint.sh /usr/local/bin/controller-entrypoint.sh
 EXPOSE 8008
 EXPOSE 8080
 EXPOSE 445
-EXPOSE 51820/udp
 ENTRYPOINT ["/usr/local/bin/controller-entrypoint.sh"]
