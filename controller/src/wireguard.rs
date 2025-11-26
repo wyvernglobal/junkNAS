@@ -43,8 +43,9 @@ pub fn generate_ephemeral_keypair() -> Result<(String, String)> {
 }
 
 pub fn controller_endpoint(state: &ControllerState) -> Option<String> {
-    let controller_node_id =
-        env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".to_string());
+    if let Ok(ep) = env::var("JUNKNAS_LOCAL_AGENT_ENDPOINT") {
+        return Some(ep);
+    }
 
     if let Ok(ep) = env::var("JUNKNAS_SAMBA_ENDPOINT") {
         return Some(ep);
@@ -54,28 +55,26 @@ pub fn controller_endpoint(state: &ControllerState) -> Option<String> {
         return Some(ep);
     }
 
-    if let Some(node) = state.nodes.get(&controller_node_id) {
-        if let Some(ep) = &node.mesh_endpoint {
-            return Some(ep.clone());
-        }
-
-        if let Some(ip) = node.ip.as_ref() {
-            let port = node.mesh_port.unwrap_or_else(advertised_port);
-            return Some(format_endpoint(ip, port));
-        }
+    // Prefer the highest-scoring peer as the contact point. Agents now publish the
+    // WireGuard port so the controller simply reuses their advertised endpoint.
+    if let Some(best) = state
+        .mesh_peers
+        .values()
+        .filter(|p| !p.endpoint.is_empty())
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    {
+        return Some(best.endpoint.clone());
     }
 
-    if let Ok(ip) = env::var("WG_ADDRESS") {
-        let addr = ip.split('/').next().unwrap_or(&ip);
-        return Some(format_endpoint(addr, advertised_port()));
-    }
-
-    if let Ok(ip) = env::var("WG_ADDRESS_V6") {
-        let addr = ip.split('/').next().unwrap_or(&ip);
-        return Some(format_endpoint(addr, advertised_port()));
-    }
-
-    None
+    state
+        .mesh_peers
+        .values()
+        .find(|p| !p.endpoint.is_empty())
+        .map(|p| p.endpoint.clone())
 }
 
 pub fn render_samba_client_config(
@@ -103,12 +102,13 @@ pub fn render_samba_client_config(
     lines.join("\n") + "\n"
 }
 
-/// Builds a WireGuard server config for the controller using in-memory state.
+/// Builds a WireGuard client/peer config for the controller using in-memory state.
 ///
 /// The controller node id defaults to `controller` but can be overridden with
 /// `CONTROLLER_NODE_ID`. Endpoint host portions can be overridden with
-/// `WG_ENDPOINT_OVERRIDE` to cope with VPN/NAT detection quirks.
-/// IPv6 endpoints are preferred when present.
+/// `WG_ENDPOINT_OVERRIDE` to cope with VPN/NAT detection quirks. IPv6 endpoints are
+/// preferred when present. Agents now host the WireGuard port; the controller simply
+/// dials their advertised endpoints.
 pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
     let controller_node_id =
         env::var("CONTROLLER_NODE_ID").unwrap_or_else(|_| "controller".to_string());
@@ -117,9 +117,9 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
     let interface = default_interface();
     let path = config_path(&interface);
 
-    let endpoint_override = env::var("WG_ENDPOINT_OVERRIDE").ok();
+    let peer_override = env::var("WG_ENDPOINT_OVERRIDE").ok();
     let default_allowed =
-        env::var("WG_ALLOWED_FALLBACK").unwrap_or_else(|_| "0.0.0.0/0,::/0".to_string());
+        env::var("WG_ALLOWED_FALLBACK").unwrap_or_else(|_| "fd44::/64".to_string());
 
     let listen_port = env::var("WG_LISTEN_PORT")
         .ok()
@@ -152,12 +152,8 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
     lines.push("[Interface]".to_string());
     lines.push(format!("PrivateKey = {}", keypair.private_key));
     lines.push(format!("ListenPort = {}", listen_port));
-    lines.push("SaveConfig = true".to_string());
     for addr in interface_addresses {
         lines.push(format!("Address = {}", addr));
-    }
-    if let Some(override_host) = &endpoint_override {
-        lines.push(format!("# Endpoint override: {}", override_host));
     }
 
     let mut peers: Vec<MeshPeer> = state.mesh_peers.values().cloned().collect();
@@ -167,12 +163,17 @@ pub fn render(state: &ControllerState) -> Option<RenderedConfig> {
         if peer.node_id == controller_node_id {
             continue;
         }
-        let node_meta = state.nodes.get(&peer.node_id);
-        let endpoint = compute_endpoint(node_meta, &peer, endpoint_override.as_deref());
-        let allowed_ips = node_meta
-            .and_then(|n| n.ip.as_ref())
-            .map(|ip| ip_to_cidr(ip))
-            .unwrap_or_else(|| default_allowed.clone());
+        let endpoint = if let Some(override_host) = peer_override.as_deref() {
+            split_endpoint(&peer.endpoint)
+                .map(|(_, port)| format_endpoint(override_host, port))
+                .or(Some(peer.endpoint.clone()))
+        } else if peer.endpoint.is_empty() {
+            None
+        } else {
+            Some(peer.endpoint.clone())
+        };
+
+        let allowed_ips = default_allowed.clone();
 
         lines.push(String::new());
         lines.push("[Peer]".to_string());
