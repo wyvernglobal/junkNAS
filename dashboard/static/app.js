@@ -54,6 +54,7 @@ async function fetchNodes() {
   renderNatMap(nodes);
   enqueueNewNodes(nodes);
   renderSambaHosts(sambaHosts);
+  refreshControllerSelect();
 }
 
 async function fetchSambaMetadata() {
@@ -353,31 +354,130 @@ function initSetupModal() {
   document.getElementById("setup-skip").addEventListener("click", skipSetupPlan);
 }
 
-function initMergeForm() {
-  const submitBtn = document.getElementById("merge-submit");
-  const status = document.getElementById("merge-status");
-  const clusterInput = document.getElementById("merge-cluster-name");
-  const wgInput = document.getElementById("merge-config");
+function controllerCandidates() {
+  if (!Array.isArray(lastNodes)) return [];
 
-  submitBtn.addEventListener("click", () => {
-    const clusterName = clusterInput.value.trim() || "unnamed cluster";
-    const configText = wgInput.value.trim();
-
-    if (!configText) {
-      status.innerText = "Please paste a WireGuard config to continue.";
-      status.classList.add("error");
-      return;
-    }
-
-    status.classList.remove("error");
-    status.innerText = "WireGuard config captured. Ready to sync with cluster.";
-
-    const history = JSON.parse(localStorage.getItem("junknasMergeHistory") || "[]");
-    history.unshift({ clusterName, configText, ts: Date.now() });
-    localStorage.setItem("junknasMergeHistory", JSON.stringify(history.slice(0, 5)));
-
-    wgInput.value = "";
+  const controllers = lastNodes.filter((n) => {
+    return (
+      n.role === "controller" ||
+      n.kind === "controller" ||
+      n.is_controller === true ||
+      n.isController === true ||
+      (Array.isArray(n.roles) && n.roles.includes("controller"))
+    );
   });
+
+  return controllers.length ? controllers : lastNodes;
+}
+
+function refreshControllerSelect() {
+  const select = document.getElementById("mesh-controller");
+  if (!select) return;
+
+  select.innerHTML = "";
+  const options = controllerCandidates();
+
+  if (!options.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No controllers detected";
+    opt.disabled = true;
+    opt.selected = true;
+    select.appendChild(opt);
+    return;
+  }
+
+  options.forEach((n, idx) => {
+    const opt = document.createElement("option");
+    const label = n.hostname || n.node_id || `controller-${idx + 1}`;
+    opt.value = n.node_id || n.hostname || label;
+    opt.textContent = `${label}${n.node_id ? ` (${n.node_id})` : ""}`;
+    select.appendChild(opt);
+  });
+}
+
+function setMeshModalStatus(text, isError = false) {
+  const status = document.getElementById("mesh-modal-status");
+  if (!status) return;
+  status.innerText = text;
+  status.classList.toggle("error", !!isError);
+}
+
+function closeMeshModal() {
+  const modal = document.getElementById("mesh-modal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+}
+
+function openMeshModal() {
+  const modal = document.getElementById("mesh-modal");
+  const ipInput = document.getElementById("mesh-ip");
+  if (!modal || !ipInput) return;
+
+  refreshControllerSelect();
+  setMeshModalStatus("");
+  modal.classList.remove("hidden");
+  ipInput.focus();
+}
+
+function recordMeshSyncRequest(ip, controllerLabel) {
+  const status = document.getElementById("mesh-sync-status");
+  if (status) {
+    status.innerText = `Mesh sync prepared for ${ip} via ${controllerLabel}.`;
+    status.classList.remove("error");
+  }
+
+  const history = JSON.parse(localStorage.getItem("junknasMeshSyncHistory") || "[]");
+  history.unshift({ ip, controller: controllerLabel, ts: Date.now() });
+  localStorage.setItem("junknasMeshSyncHistory", JSON.stringify(history.slice(0, 5)));
+}
+
+function submitMeshSync() {
+  const ipInput = document.getElementById("mesh-ip");
+  const controllerSelect = document.getElementById("mesh-controller");
+  const ip = ipInput?.value.trim();
+  const controllerValue = controllerSelect?.value || "";
+  const controllerLabel =
+    controllerSelect?.selectedOptions?.[0]?.innerText || controllerValue;
+
+  if (!ip) {
+    setMeshModalStatus("Peer IP is required.", true);
+    return;
+  }
+
+  if (!controllerValue) {
+    setMeshModalStatus("Select a master controller to continue.", true);
+    return;
+  }
+
+  setMeshModalStatus("");
+  closeMeshModal();
+  recordMeshSyncRequest(ip, controllerLabel || "controller");
+
+  if (ipInput) {
+    ipInput.value = "";
+  }
+}
+
+function initMeshSyncFlow() {
+  const openBtn = document.getElementById("mesh-sync-open");
+  const submitBtn = document.getElementById("mesh-submit");
+  const cancelBtn = document.getElementById("mesh-cancel");
+
+  if (openBtn && !openBtn.dataset.bound) {
+    openBtn.dataset.bound = "true";
+    openBtn.addEventListener("click", openMeshModal);
+  }
+
+  if (submitBtn && !submitBtn.dataset.bound) {
+    submitBtn.dataset.bound = "true";
+    submitBtn.addEventListener("click", submitMeshSync);
+  }
+
+  if (cancelBtn && !cancelBtn.dataset.bound) {
+    cancelBtn.dataset.bound = "true";
+    cancelBtn.addEventListener("click", closeMeshModal);
+  }
 }
 
 function renderSambaQr(text) {
@@ -481,7 +581,7 @@ async function main() {
   try {
     await loadConfig();
     initSetupModal();
-    initMergeForm();
+    initMeshSyncFlow();
     await fetchNodes();
     await fetchSambaMetadata();
     setInterval(() => {

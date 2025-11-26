@@ -109,16 +109,13 @@ struct LsblkBlockDevice {
 fn choose_controller_url() -> String {
     let mut candidates = vec![
         // Preferred host-forwarded ports (dashboards typically live at 8080)
-        "http://host.containers.internal:8008/api".to_string(),
-        "http://127.0.0.1:8008/api".to_string(),
-        "http://host.containers.internal:8088/api".to_string(),
-        "http://127.0.0.1:8088/api".to_string(),
+        "http://localhost:8008/api".to_string(),
+        "http://localhost:8088/api".to_string(),
         // Overlay defaults
         "http://10.44.0.1:8008/api".to_string(),
         DEFAULT_CONTROLLER_URL.to_string(),
         // Legacy port on host
-        "http://host.containers.internal:8080/api".to_string(),
-        "http://127.0.0.1:8080/api".to_string(),
+        "http://localhost:8080/api".to_string(),
     ];
 
     if let Ok(url) = std::env::var("JUNKNAS_CONTROLLER_URL") {
