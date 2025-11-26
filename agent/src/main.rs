@@ -292,11 +292,9 @@ fn render_agent_wireguard_config(
     let address = std::env::var("JUNKNAS_WG_ADDRESS_V6")
         .unwrap_or_else(|_| derive_ipv6_address(&cfg.agent_id));
 
-    let endpoint = std::env::var("JUNKNAS_WG_ENDPOINT")
-        .or_else(|_| std::env::var("WG_ENDPOINT_OVERRIDE"))
-        .unwrap_or_else(|_| {
-            format_endpoint(&advertised_endpoint_host(), advertised_endpoint_port())
-        });
+    let controller_endpoint = std::env::var("JUNKNAS_WG_CONTROLLER_ENDPOINT")
+        .or_else(|_| std::env::var("JUNKNAS_WG_ENDPOINT"))
+        .ok();
 
     let mut lines = vec!["[Interface]".to_string()];
     lines.push(format!("PrivateKey = {}", private_key));
@@ -308,8 +306,11 @@ fn render_agent_wireguard_config(
     lines.push("[Peer]".to_string());
     lines.push(format!("PublicKey = {}", controller_public_key));
     lines.push(format!("AllowedIPs = {}", allowed_ips));
-    lines.push(format!("Endpoint = {}", endpoint));
-    lines.push("PersistentKeepalive = 25".to_string());
+
+    if let Some(endpoint) = controller_endpoint {
+        lines.push(format!("Endpoint = {}", endpoint));
+        lines.push("PersistentKeepalive = 25".to_string());
+    }
 
     Ok(lines.join("\n") + "\n")
 }

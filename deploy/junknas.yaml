@@ -30,8 +30,6 @@ spec:
               hostPort: 8088   # expose controller API on host:8088
             - containerPort: 8080
               hostPort: 8080   # serve dashboard on host:8080
-            - containerPort: 51820
-              hostPort: 58008  # publish WireGuard on host:58008/udp (80085 requested but above port limit)
             - containerPort: 445
           volumeMounts:
             - name: junknas-wireguard
@@ -42,10 +40,10 @@ spec:
           env:
             - name: JUNKNAS_API_PUBLIC_PORT
               value: "8088"
-            - name: WG_ENDPOINT_PORT
-              value: "58008"
             - name: WG_ADDRESS_V6
               value: "fd44::1/64"
+            - name: JUNKNAS_LOCAL_AGENT_ENDPOINT
+              value: "junknas-agent.junknas.svc.cluster.local:51820"
             - name: SAMBA_CLIENT_PREFIX
               value: "fd44::"
             - name: SAMBA_ALLOWED_IPS
@@ -88,11 +86,17 @@ spec:
           securityContext:
             capabilities:
               add: ["NET_ADMIN"]
+          ports:
+            - containerPort: 51820
+              hostPort: 58008  # publish WireGuard from the agent itself
+              protocol: UDP
           env:
             - name: JUNKNAS_CONTROLLER_URL
               value: "http://10.44.0.1:8008/api"  # WireGuard overlay endpoint
             - name: JUNKNAS_AGENT_ROLE
               value: "pure"
+            - name: JUNKNAS_WG_LISTEN_PORT
+              value: "51820"
           devices:
             - containerPath: /dev/fuse
               hostPath: /dev/fuse
@@ -174,3 +178,17 @@ spec:
     - name: smb
       port: 445
       targetPort: 445
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: junknas-agent
+  namespace: junknas
+spec:
+  selector:
+    app: junknas-agent
+  ports:
+    - name: wireguard
+      port: 51820
+      targetPort: 51820
+      protocol: UDP
