@@ -92,7 +92,7 @@ spec:
               protocol: UDP
           env:
             - name: JUNKNAS_CONTROLLER_URL
-              value: "http://10.44.0.1:8008/api"  # WireGuard overlay endpoint
+              value: "http://[fd44::1]:8008/api"  # WireGuard overlay endpoint
             - name: JUNKNAS_AGENT_ROLE
               value: "pure"
             - name: JUNKNAS_WG_LISTEN_PORT

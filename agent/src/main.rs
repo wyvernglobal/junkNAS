@@ -39,7 +39,7 @@ use crate::{
     nat::ConnectivityMode,
 };
 
-const DEFAULT_CONTROLLER_URL: &str = "http://10.44.0.1:8008/api";
+const DEFAULT_CONTROLLER_URL: &str = "http://[fd44::1]:8008/api";
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -107,63 +107,19 @@ struct LsblkBlockDevice {
 }
 
 fn choose_controller_url() -> String {
-    let mut candidates = vec![
-        // Preferred host-forwarded ports (dashboards typically live at 8080)
-        "http://localhost:8008/api".to_string(),
-        "http://localhost:8088/api".to_string(),
-        // Overlay defaults
-        "http://10.44.0.1:8008/api".to_string(),
-        DEFAULT_CONTROLLER_URL.to_string(),
-        // Legacy port on host
-        "http://localhost:8080/api".to_string(),
-    ];
-
     if let Ok(url) = std::env::var("JUNKNAS_CONTROLLER_URL") {
         println!(
-            "[agent] using controller from JUNKNAS_CONTROLLER_URL={}",
+            "[agent] using controller from JUNKNAS_CONTROLLER_URL={} (WireGuard peer)",
             url
         );
-
-        if controller_reachable(&url) {
-            return url;
-        }
-
-        println!("[agent] JUNKNAS_CONTROLLER_URL unreachable; probing fallbacks");
-
-        if std::env::var("JUNKNAS_CONTROLLER_URL_STRICT").is_ok() {
-            return url;
-        }
-
-        if !candidates.contains(&url) {
-            candidates.insert(0, url);
-        }
-    }
-
-    for url in &candidates {
-        if controller_reachable(url) {
-            println!("[agent] using controller endpoint {}", url);
-            return url.clone();
-        }
-
-        println!("[agent] controller probe failed for {}", url);
+        return url;
     }
 
     println!(
-        "[agent] no controller endpoints reachable; falling back to {}",
+        "[agent] defaulting to controller WireGuard peer at {}",
         DEFAULT_CONTROLLER_URL
     );
-
     DEFAULT_CONTROLLER_URL.to_string()
-}
-
-fn controller_reachable(url: &str) -> bool {
-    if let Ok(client) = Client::builder().timeout(Duration::from_secs(1)).build() {
-        if client.get(format!("{}/nodes", url)).send().is_ok() {
-            return true;
-        }
-    }
-
-    false
 }
 
 fn agent_config_dir() -> anyhow::Result<PathBuf> {
@@ -239,6 +195,33 @@ fn ensure_wireguard_overlay() {
                 cfg, err
             );
         }
+    }
+}
+
+fn wait_for_controller_over_wireguard(controller_url: &str) {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .expect("failed to build controller probe client");
+
+    loop {
+        match client
+            .get(format!("{}/nodes", controller_url.trim_end_matches('/')))
+            .send()
+        {
+            Ok(resp) if resp.status().is_success() => {
+                println!("[agent] controller reachable over WireGuard");
+                break;
+            }
+            _ => {
+                println!(
+                    "[agent] waiting for WireGuard peer controller at {}",
+                    controller_url
+                );
+            }
+        }
+
+        thread::sleep(Duration::from_secs(2));
     }
 }
 
@@ -587,6 +570,7 @@ fn main() -> anyhow::Result<()> {
 
     write_wireguard_config(&agent_config, &controller_url)?;
     ensure_wireguard_overlay();
+    wait_for_controller_over_wireguard(&controller_url);
 
     // NAT discovery
     println!("[agent] NAT discovery…");
