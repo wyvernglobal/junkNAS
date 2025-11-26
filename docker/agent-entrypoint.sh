@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -euo pipefail
 
 WG_CONF="${JUNKNAS_WG_CONF:-/etc/wireguard/junknas.conf}"
