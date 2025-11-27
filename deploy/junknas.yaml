@@ -27,7 +27,7 @@ spec:
               add: ["NET_ADMIN"]
           ports:
             - containerPort: 8008
-              hostPort: 8088   # expose controller API on host:8088
+              hostPort: 8008   # expose controller API on host:8008
             - containerPort: 8080
               hostPort: 8080   # serve dashboard on host:8080
             - containerPort: 445
@@ -39,7 +39,7 @@ spec:
               mountPath: /srv/junknas-share
           env:
             - name: JUNKNAS_API_PUBLIC_PORT
-              value: "8088"
+              value: "8008"
             - name: WG_ADDRESS_V6
               value: "fd44::1/64"
             - name: JUNKNAS_LOCAL_AGENT_ENDPOINT

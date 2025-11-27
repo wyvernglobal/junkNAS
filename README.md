@@ -91,8 +91,7 @@ Agents skip any block devices whose mountpoint is marked `[SWAP]`, ensuring swap
 partitions are never used for junkNAS storage.
 
 For local testing without WireGuard, agents will probe a few sane defaults—first
-`localhost:8088`, then `localhost:8008`,
-and finally the legacy `localhost:8080`
+`localhost:8008`, and then the legacy `localhost:8080`
 —before falling back to the overlay address. If `JUNKNAS_CONTROLLER_URL` is set but
 unreachable, the agent now falls back to probing those addresses unless you set
 `JUNKNAS_CONTROLLER_URL_STRICT=1` to force the configured endpoint.
