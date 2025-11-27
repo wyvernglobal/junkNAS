@@ -13,10 +13,10 @@ AGENT_KEY_PATH="$STATE_DIR/agent.key"
 PEER_KEY_PATH="$STATE_DIR/controller.key"
 AGENT_PORT="${JUNKNAS_AGENT_PORT:-51820}"
 CONTROLLER_PORT="${JUNKNAS_CONTROLLER_PORT:-51821}"
-AGENT_ENDPOINT="${JUNKNAS_AGENT_ENDPOINT:-127.0.0.1:${AGENT_PORT}}"
-CONTROLLER_ENDPOINT="${JUNKNAS_CONTROLLER_ENDPOINT:-127.0.0.1:${CONTROLLER_PORT}}"
-AGENT_ADDRESS="${JUNKNAS_AGENT_ADDRESS:-10.44.0.2/32}"
-CONTROLLER_ADDRESS="${JUNKNAS_CONTROLLER_ADDRESS:-10.44.0.1/32}"
+AGENT_ENDPOINT="${JUNKNAS_AGENT_ENDPOINT:-[::1]:${AGENT_PORT}}"
+CONTROLLER_ENDPOINT="${JUNKNAS_CONTROLLER_ENDPOINT:-[::1]:${CONTROLLER_PORT}}"
+AGENT_ADDRESS="${JUNKNAS_AGENT_ADDRESS:-fd44::2/128}"
+CONTROLLER_ADDRESS="${JUNKNAS_CONTROLLER_ADDRESS:-fd44::1/128}"
 
 if [ ! -s "$AGENT_KEY_PATH" ]; then
   echo "[agent-entrypoint] generating WireGuard keypair for agent interface"
@@ -66,25 +66,11 @@ Endpoint = ${AGENT_ENDPOINT}
 PersistentKeepalive = 25
 EOF_PEER
 
-if command -v python3 >/dev/null 2>&1; then
-  PAYLOAD=$(INTERFACE="$INTERFACE" PEER_CONF="$PEER_CONF" python3 - <<'PY'
-import json
-import os
-
-payload = {
-    "interface": os.environ["INTERFACE"],
-    "path": os.environ["PEER_CONF"],
-}
-with open(os.environ["PEER_CONF"], "r", encoding="utf-8") as fp:
-    payload["config"] = fp.read()
-
-print(json.dumps(payload))
-PY
-  )
-else
-  echo "[agent-entrypoint] python3 not available to build controller payload" >&2
-  exit 1
-fi
+CONFIG_B64=$(base64 <"$PEER_CONF" | tr -d '\n')
+PAYLOAD=$(cat <<EOF
+{"interface":"$INTERFACE","path":"$PEER_CONF","config_base64":"$CONFIG_B64"}
+EOF
+)
 
 echo "[agent-entrypoint] sending peer config to controller at ${CONTROLLER_API}/mesh/peer-config"
 curl -fsS -X POST "${CONTROLLER_API}/mesh/peer-config" \

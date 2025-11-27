@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -87,7 +88,9 @@ pub struct WireGuardKeyPair {
 pub struct WireGuardPeerConfig {
     pub interface: String,
     pub path: Option<String>,
+    #[serde(default)]
     pub config: String,
+    pub config_base64: Option<String>,
 }
 
 /// What agents send during heartbeat.
@@ -647,7 +650,24 @@ async fn apply_external_peer_config(Json(body): Json<WireGuardPeerConfig>) -> St
         .map(PathBuf::from)
         .unwrap_or_else(|| wireguard::config_path(&body.interface));
 
-    match wireguard::write_external_and_activate(&path, &body.config) {
+    let config = match body.config_base64 {
+        Some(ref b64) => match STANDARD.decode(b64) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    warn!("Invalid UTF-8 in pushed WireGuard config: {err}");
+                    return StatusCode::BAD_REQUEST;
+                }
+            },
+            Err(err) => {
+                warn!("Invalid base64 in pushed WireGuard config: {err}");
+                return StatusCode::BAD_REQUEST;
+            }
+        },
+        None => body.config.clone(),
+    };
+
+    match wireguard::write_external_and_activate(&path, &config) {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(err) => {
             warn!(
