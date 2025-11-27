@@ -234,6 +234,33 @@ pub fn write_and_reload(cfg: RenderedConfig) -> Result<()> {
     Ok(())
 }
 
+/// Writes the supplied config to disk and activates it via `wg-quick up`.
+///
+/// The config is persisted at `path` so that subsequent restarts keep the same
+/// WireGuard identity, allowing a mesh to form incrementally.
+pub fn write_external_and_activate(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(path, contents)?;
+    let path_str = path.to_string_lossy();
+
+    if let Err(e) = Command::new("wg-quick")
+        .arg("down")
+        .arg(&*path_str)
+        .status()
+    {
+        warn!("wg-quick down {} failed: {}", path_str, e);
+    }
+
+    if let Err(e) = Command::new("wg-quick").arg("up").arg(&*path_str).status() {
+        warn!("wg-quick up {} failed: {}", path_str, e);
+    }
+
+    Ok(())
+}
+
 /// Ensures a WireGuard config file exists on disk before the controller starts.
 pub fn ensure_config_file(interface: &str) -> Result<PathBuf> {
     let path = config_path(interface);
@@ -256,7 +283,7 @@ fn restart_interface(interface: &str) {
     }
 }
 
-fn config_path(interface: &str) -> PathBuf {
+pub fn config_path(interface: &str) -> PathBuf {
     if let Ok(p) = env::var("WG_CONFIG_PATH") {
         Path::new(&p).to_path_buf()
     } else {
