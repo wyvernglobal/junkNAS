@@ -18,6 +18,7 @@
 #define JUNKNAS_FUSE_FS_H
 
 #include "config.h"
+#include "mesh.h"
 
 /*
  * Start the FUSE filesystem.
@@ -29,6 +30,9 @@
  * @param argv      argv passed from main() (used by FUSE for options)
  * @return          0 on normal exit, -1 on error
  */
-int junknas_fuse_run(const junknas_config_t *cfg, int argc, char **argv);
+int junknas_fuse_run(const junknas_config_t *cfg,
+                     junknas_mesh_t *mesh,
+                     int argc,
+                     char **argv);
 
 #endif /* JUNKNAS_FUSE_FS_H */

@@ -193,6 +193,7 @@ typedef struct {
     char   refs_dir[MAX_PATH_LEN]; /* <bakcing>/.jnk/refs */
     int    verbose;
     size_t quota_bytes;             /* 0 = unlimited */
+    junknas_mesh_t *mesh;
 } jnk_fuse_state_t;
 
 /* Per-open handle */
@@ -680,6 +681,10 @@ static int store_put_chunk_if_missing(jnk_fuse_state_t *s, const char hashhex[65
         return -EIO;
     }
 
+    if (s->mesh) {
+        (void)junknas_mesh_replicate_chunk(s->mesh, hashhex, data, len);
+    }
+
     return 0;
 }
 
@@ -691,6 +696,15 @@ static int read_chunk_verified(const jnk_fuse_state_t *s, const char hashhex[65]
         if (store_path_for_hash(p, s->store_dirs[i], hashhex, 0) != 0) continue;
         fd = open(p, O_RDONLY);
         if (fd >= 0) break;
+    }
+    if (fd < 0 && s->mesh) {
+        for (size_t i = 0; i < s->store_dir_count; i++) {
+            if (store_path_for_hash(p, s->store_dirs[i], hashhex, 1) != 0) continue;
+            if (junknas_mesh_fetch_chunk(s->mesh, hashhex, p) == 0) {
+                fd = open(p, O_RDONLY);
+                if (fd >= 0) break;
+            }
+        }
     }
     if (fd < 0) return -ENOENT;
 
@@ -1354,7 +1368,10 @@ static const struct fuse_operations jnk_ops = {
 
 /* ---------------------------- Entry Point ------------------------------ */
 
-int junknas_fuse_run(const junknas_config_t *cfg, int argc, char **argv) {
+int junknas_fuse_run(const junknas_config_t *cfg,
+                     junknas_mesh_t *mesh,
+                     int argc,
+                     char **argv) {
     if (!cfg) return -1;
 
     jnk_fuse_state_t *state = (jnk_fuse_state_t *)calloc(1, sizeof(*state));
@@ -1371,6 +1388,7 @@ int junknas_fuse_run(const junknas_config_t *cfg, int argc, char **argv) {
     state->store_rr_next = 0;
     state->verbose = cfg->verbose;
     state->quota_bytes = cfg->max_storage_bytes; /* 0 = unlimited */
+    state->mesh = mesh;
 
     if (mkdir(state->backing_dir, 0755) != 0) {
         if (errno != EEXIST) { free(state); return -1; }
