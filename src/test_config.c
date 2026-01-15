@@ -15,6 +15,10 @@
 static void dump_config(const junknas_config_t *cfg) {
     printf("junkNAS configuration:\n");
     printf("  data_dir:        %s\n", cfg->data_dir);
+    printf("  data_dirs (%zu):\n", cfg->data_dir_count);
+    for (size_t i = 0; i < cfg->data_dir_count; i++) {
+        printf("    - %s\n", cfg->data_dirs[i]);
+    }
     printf("  mount_point:     %s\n", cfg->mount_point);
     printf("  storage_size:    %s\n", cfg->storage_size);
     printf("  max_storage:     %zu bytes\n", cfg->max_storage_bytes);

@@ -253,6 +253,8 @@ static void set_defaults(junknas_config_t *config) {
 
     /* Paths */
     (void)safe_strcpy(config->data_dir, sizeof(config->data_dir), DEFAULT_DATA_DIR);
+    (void)safe_strcpy(config->data_dirs[0], sizeof(config->data_dirs[0]), DEFAULT_DATA_DIR);
+    config->data_dir_count = 1;
     (void)safe_strcpy(config->mount_point, sizeof(config->mount_point), DEFAULT_MOUNT_POINT);
     (void)safe_strcpy(config->config_file_path, sizeof(config->config_file_path), DEFAULT_CONFIG_FILE);
 
@@ -292,6 +294,10 @@ int junknas_config_validate(const junknas_config_t *config) {
 
     /* Basic string sanity */
     if (config->data_dir[0] == '\0') return -1;
+    if (config->data_dir_count == 0 || config->data_dir_count > MAX_DATA_DIRS) return -1;
+    for (size_t i = 0; i < config->data_dir_count; i++) {
+        if (config->data_dirs[i][0] == '\0') return -1;
+    }
     if (config->mount_point[0] == '\0') return -1;
     if (config->wg.interface_name[0] == '\0') return -1;
     if (config->wg.wg_ip[0] == '\0') return -1;
@@ -340,6 +346,33 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
     cJSON *data_dir = cJSON_GetObjectItemCaseSensitive(root, "data_dir");
     if (cJSON_IsString(data_dir) && data_dir->valuestring) {
         (void)safe_strcpy(config->data_dir, sizeof(config->data_dir), data_dir->valuestring);
+        (void)safe_strcpy(config->data_dirs[0], sizeof(config->data_dirs[0]), config->data_dir);
+        config->data_dir_count = 1;
+    }
+
+    /* data_dirs */
+    cJSON *data_dirs = cJSON_GetObjectItemCaseSensitive(root, "data_dirs");
+    if (cJSON_IsArray(data_dirs)) {
+        config->data_dir_count = 0;
+        int n = cJSON_GetArraySize(data_dirs);
+        if (n > MAX_DATA_DIRS) n = MAX_DATA_DIRS;
+
+        for (int i = 0; i < n; i++) {
+            cJSON *dir = cJSON_GetArrayItem(data_dirs, i);
+            if (cJSON_IsString(dir) && dir->valuestring) {
+                (void)safe_strcpy(config->data_dirs[config->data_dir_count],
+                                  sizeof(config->data_dirs[config->data_dir_count]),
+                                  dir->valuestring);
+                config->data_dir_count++;
+            }
+        }
+
+        if (config->data_dir_count > 0) {
+            (void)safe_strcpy(config->data_dir, sizeof(config->data_dir), config->data_dirs[0]);
+        } else {
+            (void)safe_strcpy(config->data_dirs[0], sizeof(config->data_dirs[0]), config->data_dir);
+            config->data_dir_count = 1;
+        }
     }
 
     /* mount_point */
@@ -429,6 +462,18 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
     /* top-level fields */
     cJSON_AddStringToObject(root, "storage_size", config->storage_size);
     cJSON_AddStringToObject(root, "data_dir", config->data_dir);
+    cJSON *data_dirs_out = cJSON_CreateArray();
+    if (!data_dirs_out) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    cJSON_AddItemToObject(root, "data_dirs", data_dirs_out);
+
+    size_t dir_count = (config->data_dir_count > 0) ? config->data_dir_count : 1;
+    for (size_t i = 0; i < dir_count && i < MAX_DATA_DIRS; i++) {
+        const char *dir = (config->data_dir_count > 0) ? config->data_dirs[i] : config->data_dir;
+        cJSON_AddItemToArray(data_dirs_out, cJSON_CreateString(dir));
+    }
     cJSON_AddStringToObject(root, "mount_point", config->mount_point);
     cJSON_AddNumberToObject(root, "web_port", (double)config->web_port);
 

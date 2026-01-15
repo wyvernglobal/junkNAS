@@ -187,7 +187,9 @@ static void sha256_buf_hex(const void *data, size_t n, char hex[65]) {
 
 typedef struct {
     char   backing_dir[MAX_PATH_LEN];
-    char   store_dir[MAX_PATH_LEN]; /* <backing>/.jnk/chunks/sha256 */
+    char   store_dirs[MAX_DATA_DIRS][MAX_PATH_LEN]; /* <backing>/.jnk/chunks/sha256 */
+    size_t store_dir_count;
+    size_t store_rr_next;
     char   refs_dir[MAX_PATH_LEN]; /* <bakcing>/.jnk/refs */
     int    verbose;
     size_t quota_bytes;             /* 0 = unlimited */
@@ -339,37 +341,53 @@ static int ensure_dir(const char *p) {
     return 0;
 }
 
-static int ensure_store_layout(jnk_fuse_state_t *s) {
-  /* Create <backing>/.jnk, <backing>/.jnk/chunks/sha256, <backing>/.jnk/refs */
-  char p1[MAX_PATH_LEN], p2[MAX_PATH_LEN], p3[MAX_PATH_LEN], p4[MAX_PATH_LEN];
+static int ensure_store_layout_dir(const char *base_dir) {
+  /* Create <base>/.jnk, <base>/.jnk/chunks/sha256 */
+  char p1[MAX_PATH_LEN], p2[MAX_PATH_LEN], p3[MAX_PATH_LEN];
 
-  if (snprintf(p1, sizeof(p1), "%s/%s", s->backing_dir, INTERNAL_DIR) >= (int)sizeof(p1)) return -1;
-  if (snprintf(p2, sizeof(p2), "%s/%s/chunks", s->backing_dir, INTERNAL_DIR) >= (int)sizeof(p2)) return -1;
-  if (snprintf(p3, sizeof(p3), "%s/%s/chunks/sha256", s->backing_dir, INTERNAL_DIR) >= (int)sizeof(p3)) return -1;
-  if (snprintf(p4, sizeof(p4), "%s/%s/refs", s->backing_dir, INTERNAL_DIR) >= (int)sizeof(p4)) return -1;
+  if (snprintf(p1, sizeof(p1), "%s/%s", base_dir, INTERNAL_DIR) >= (int)sizeof(p1)) return -1;
+  if (snprintf(p2, sizeof(p2), "%s/%s/chunks", base_dir, INTERNAL_DIR) >= (int)sizeof(p2)) return -1;
+  if (snprintf(p3, sizeof(p3), "%s/%s/chunks/sha256", base_dir, INTERNAL_DIR) >= (int)sizeof(p3)) return -1;
 
   if (ensure_dir(p1) != 0) return -1;
   if (ensure_dir(p2) != 0) return -1;
   if (ensure_dir(p3) != 0) return -1;
-  if (ensure_dir(p4) != 0) return -1;
-
-  strncpy(s->store_dir, p3, sizeof(s->store_dir) - 1);
-  strncpy(s->refs_dir,  p4, sizeof(s->refs_dir)  - 1);
 
   return 0;
 }
 
-static int store_path_for_hash(char out[MAX_PATH_LEN], const jnk_fuse_state_t *s, const char hashhex[65]) {
+static int ensure_store_layout(jnk_fuse_state_t *s) {
+  /* Create <backing>/.jnk, <backing>/.jnk/refs */
+  char p1[MAX_PATH_LEN], p4[MAX_PATH_LEN];
+
+  if (snprintf(p1, sizeof(p1), "%s/%s", s->backing_dir, INTERNAL_DIR) >= (int)sizeof(p1)) return -1;
+  if (snprintf(p4, sizeof(p4), "%s/%s/refs", s->backing_dir, INTERNAL_DIR) >= (int)sizeof(p4)) return -1;
+
+  if (ensure_dir(p1) != 0) return -1;
+  if (ensure_dir(p4) != 0) return -1;
+
+  strncpy(s->refs_dir,  p4, sizeof(s->refs_dir)  - 1);
+
+  for (size_t i = 0; i < s->store_dir_count; i++) {
+      if (ensure_store_layout_dir(s->store_dirs[i]) != 0) return -1;
+  }
+
+  return 0;
+}
+
+static int store_path_for_hash(char out[MAX_PATH_LEN], const char *store_base_dir,
+                               const char hashhex[65], int ensure_shard_dir) {
     char shard[3];
     shard[0] = hashhex[0];
     shard[1] = hashhex[1];
     shard[2] = '\0';
 
     char shard_dir[MAX_PATH_LEN];
-    if (snprintf(shard_dir, sizeof(shard_dir), "%s/%s", s->store_dir, shard) >= (int)sizeof(shard_dir)) return -1;
+    if (snprintf(shard_dir, sizeof(shard_dir), "%s/%s/chunks/sha256/%s",
+                 store_base_dir, INTERNAL_DIR, shard) >= (int)sizeof(shard_dir)) return -1;
 
     /* ensure shard dir exists */
-    if (ensure_dir(shard_dir) != 0) return -1;
+    if (ensure_shard_dir && ensure_dir(shard_dir) != 0) return -1;
 
     if (snprintf(out, MAX_PATH_LEN, "%s/%s", shard_dir, hashhex) >= MAX_PATH_LEN) return -1;
     return 0;
@@ -462,8 +480,10 @@ static int apply_ref_delta(jnk_fuse_state_t *s, const char hashhex[65], long lon
         (void)unlink(refp);
 
         char chunkp[MAX_PATH_LEN];
-        if (store_path_for_hash(chunkp, s, hashhex) == 0) {
-            (void)unlink(chunkp);
+        for (size_t i = 0; i < s->store_dir_count; i++) {
+            if (store_path_for_hash(chunkp, s->store_dirs[i], hashhex, 0) == 0) {
+                (void)unlink(chunkp);
+            }
         }
         return 0;
     }
@@ -568,46 +588,56 @@ static int clone_hashes(char ***out, size_t *out_count, char **in, size_t in_cou
     return 0;
 }
 
-/* Compute current store usage by walking store_dir. (Simple & correct; can optimize later.) */
+/* Compute current store usage by walking all store dirs. (Simple & correct; can optimize later.) */
 static int64_t store_usage_bytes(const jnk_fuse_state_t *s) {
     int64_t total = 0;
-    DIR *d = opendir(s->store_dir);
-    if (!d) return -1;
-
-    struct dirent *de;
-    while ((de = readdir(d)) != NULL) {
-        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-
-        char shard[MAX_PATH_LEN];
-        if (snprintf(shard, sizeof(shard), "%s/%s", s->store_dir, de->d_name) >= (int)sizeof(shard)) continue;
-
-        DIR *sd = opendir(shard);
-        if (!sd) continue;
-
-        struct dirent *fe;
-        while ((fe = readdir(sd)) != NULL) {
-            if (strcmp(fe->d_name, ".") == 0 || strcmp(fe->d_name, "..") == 0) continue;
-
-            char fp[MAX_PATH_LEN];
-            if (snprintf(fp, sizeof(fp), "%s/%s", shard, fe->d_name) >= (int)sizeof(fp)) continue;
-
-            struct stat st;
-            if (lstat(fp, &st) == 0 && S_ISREG(st.st_mode)) total += (int64_t)st.st_size;
+    for (size_t i = 0; i < s->store_dir_count; i++) {
+        char store_root[MAX_PATH_LEN];
+        if (snprintf(store_root, sizeof(store_root), "%s/%s/chunks/sha256",
+                     s->store_dirs[i], INTERNAL_DIR) >= (int)sizeof(store_root)) {
+            continue;
         }
-        closedir(sd);
+
+        DIR *d = opendir(store_root);
+        if (!d) continue;
+
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+            if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+
+            char shard[MAX_PATH_LEN];
+            if (snprintf(shard, sizeof(shard), "%s/%s", store_root, de->d_name) >= (int)sizeof(shard)) continue;
+
+            DIR *sd = opendir(shard);
+            if (!sd) continue;
+
+            struct dirent *fe;
+            while ((fe = readdir(sd)) != NULL) {
+                if (strcmp(fe->d_name, ".") == 0 || strcmp(fe->d_name, "..") == 0) continue;
+
+                char fp[MAX_PATH_LEN];
+                if (snprintf(fp, sizeof(fp), "%s/%s", shard, fe->d_name) >= (int)sizeof(fp)) continue;
+
+                struct stat st;
+                if (lstat(fp, &st) == 0 && S_ISREG(st.st_mode)) total += (int64_t)st.st_size;
+            }
+            closedir(sd);
+        }
+
+        closedir(d);
     }
 
-    closedir(d);
     return total;
 }
 
 /* Store chunk by hash, if missing. Returns 0 on success, -ENOSPC if quota exceeded. */
 static int store_put_chunk_if_missing(jnk_fuse_state_t *s, const char hashhex[65], const uint8_t *data, size_t len) {
     char p[MAX_PATH_LEN];
-    if (store_path_for_hash(p, s, hashhex) != 0) return -EIO;
-
-    if (file_exists(p)) {
-        return 0; /* already present */
+    for (size_t i = 0; i < s->store_dir_count; i++) {
+        if (store_path_for_hash(p, s->store_dirs[i], hashhex, 0) != 0) continue;
+        if (file_exists(p)) {
+            return 0; /* already present */
+        }
     }
 
     /* quota check: if storing new unique chunk */
@@ -618,6 +648,12 @@ static int store_put_chunk_if_missing(jnk_fuse_state_t *s, const char hashhex[65
             return -ENOSPC;
         }
     }
+
+    if (s->store_dir_count == 0) return -EIO;
+    size_t target = s->store_rr_next % s->store_dir_count;
+    s->store_rr_next = (s->store_rr_next + 1) % s->store_dir_count;
+
+    if (store_path_for_hash(p, s->store_dirs[target], hashhex, 1) != 0) return -EIO;
 
     /* write atomically-ish */
     char tmp[MAX_PATH_LEN];
@@ -650,9 +686,12 @@ static int store_put_chunk_if_missing(jnk_fuse_state_t *s, const char hashhex[65
 /* Read chunk from store and verify hash. Returns number of bytes read or -EIO/-ENOENT. */
 static int read_chunk_verified(const jnk_fuse_state_t *s, const char hashhex[65], uint8_t *out, size_t max_len, size_t *out_len) {
     char p[MAX_PATH_LEN];
-    if (store_path_for_hash(p, s, hashhex) != 0) return -EIO;
-
-    int fd = open(p, O_RDONLY);
+    int fd = -1;
+    for (size_t i = 0; i < s->store_dir_count; i++) {
+        if (store_path_for_hash(p, s->store_dirs[i], hashhex, 0) != 0) continue;
+        fd = open(p, O_RDONLY);
+        if (fd >= 0) break;
+    }
     if (fd < 0) return -ENOENT;
 
     /* read whole chunk file */
@@ -1322,11 +1361,25 @@ int junknas_fuse_run(const junknas_config_t *cfg, int argc, char **argv) {
     if (!state) return -1;
 
     strncpy(state->backing_dir, cfg->data_dir, sizeof(state->backing_dir) - 1);
+    state->store_dir_count = cfg->data_dir_count;
+    if (state->store_dir_count == 0) state->store_dir_count = 1;
+    if (state->store_dir_count > MAX_DATA_DIRS) state->store_dir_count = MAX_DATA_DIRS;
+    for (size_t i = 0; i < state->store_dir_count; i++) {
+        const char *dir = (cfg->data_dir_count > 0) ? cfg->data_dirs[i] : cfg->data_dir;
+        strncpy(state->store_dirs[i], dir, sizeof(state->store_dirs[i]) - 1);
+    }
+    state->store_rr_next = 0;
     state->verbose = cfg->verbose;
     state->quota_bytes = cfg->max_storage_bytes; /* 0 = unlimited */
 
     if (mkdir(state->backing_dir, 0755) != 0) {
         if (errno != EEXIST) { free(state); return -1; }
+    }
+
+    for (size_t i = 0; i < state->store_dir_count; i++) {
+        if (mkdir(state->store_dirs[i], 0755) != 0) {
+            if (errno != EEXIST) { free(state); return -1; }
+        }
     }
 
     if (ensure_store_layout(state) != 0) {

@@ -2,7 +2,8 @@
  * junkNAS - FUSE Filesystem Interface
  *
  * This module mounts a FUSE filesystem at config->mount_point and stores
- * file contents + directories under config->data_dir.
+ * file contents + directories under config->data_dir, with chunk storage
+ * optionally spread across config->data_dirs.
  *
  * Current backend model:
  *   "backing store passthrough"
