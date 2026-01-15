@@ -40,6 +40,8 @@ static void dump_config(const junknas_config_t *cfg) {
     for (int i = 0; i < cfg->bootstrap_peer_count; i++) {
         printf("    - %s\n", cfg->bootstrap_peers[i]);
     }
+    printf("  bootstrap_peers_updated_at: %llu\n",
+           (unsigned long long)cfg->bootstrap_peers_updated_at);
 }
 
 int main(int argc, char **argv) {
