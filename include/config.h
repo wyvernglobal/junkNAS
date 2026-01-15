@@ -75,6 +75,7 @@ typedef struct {
     /* Bootstrap peers - initial peers to connect to when joining mesh */
     char bootstrap_peers[MAX_BOOTSTRAP_PEERS][MAX_ENDPOINT_LEN];
     int bootstrap_peer_count;           /* How many bootstrap peers are set */
+    uint64_t bootstrap_peers_updated_at;/* Unix epoch seconds for mesh propagation */
 
     /* Runtime flags */
     int verbose;                        /* Enable verbose logging? */

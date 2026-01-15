@@ -26,7 +26,8 @@
  *   "bootstrap_peers": [
  *     "example.com:51820",
  *     "10.0.0.2:51820"
- *   ]
+ *   ],
+ *   "bootstrap_peers_updated_at": 1714757902
  * }
  */
 
@@ -276,6 +277,7 @@ static void set_defaults(junknas_config_t *config) {
 
     /* Bootstrap list */
     config->bootstrap_peer_count = 0;
+    config->bootstrap_peers_updated_at = 0;
 }
 
 int junknas_config_validate(const junknas_config_t *config) {
@@ -449,6 +451,11 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
         }
     }
 
+    cJSON *peers_updated_at = cJSON_GetObjectItemCaseSensitive(root, "bootstrap_peers_updated_at");
+    if (cJSON_IsNumber(peers_updated_at) && peers_updated_at->valuedouble >= 0) {
+        config->bootstrap_peers_updated_at = (uint64_t)peers_updated_at->valuedouble;
+    }
+
     cJSON_Delete(root);
     return 0;
 }
@@ -507,6 +514,8 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
     for (int i = 0; i < config->bootstrap_peer_count && i < MAX_BOOTSTRAP_PEERS; i++) {
         cJSON_AddItemToArray(arr, cJSON_CreateString(config->bootstrap_peers[i]));
     }
+    cJSON_AddNumberToObject(root, "bootstrap_peers_updated_at",
+                            (double)config->bootstrap_peers_updated_at);
 
     /* Render JSON */
     char *printed = cJSON_Print(root);
