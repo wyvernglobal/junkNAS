@@ -1,0 +1,21 @@
+{
+  "storage_size": "1G",
+  "data_dir": "/tmp/junknas-data",
+  "mount_point": "/tmp/junknas-mount",
+  "web_port": 9090,
+  "verbose": true,
+  "enable_fuse": true,
+  "daemon_mode": false,
+
+  "wireguard": {
+    "interface_name": "jnk0",
+    "wg_ip": "10.99.0.42",
+    "listen_port": 51820,
+    "mtu": 1420
+  },
+
+  "bootstrap_peers": [
+    "10.0.0.1:51820",
+    "example.com:51820"
+  ]
+}

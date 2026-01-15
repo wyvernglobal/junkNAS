@@ -1,3 +1,0 @@
-[workspace]
-members = ["controller", "agent"]
-resolver = "2"
