@@ -26,12 +26,22 @@ The configuration file is JSON. The most common source of confusion is the
   "wireguard": {
     "interface_name": "jnk0",
     "wg_ip": "10.99.0.42",
+    "endpoint": "example.com:51820",
     "listen_port": 51820,
     "mtu": 1420
   },
   "bootstrap_peers": [
-    "10.0.0.1:51820",
-    "example.com:51820"
+    "10.0.0.1:8080",
+    "example.com:8080"
+  ],
+  "wg_peers": [
+    {
+      "public_key": "BASE64_PUBLIC_KEY_HERE",
+      "endpoint": "10.0.0.1:51820",
+      "wg_ip": "10.99.0.2",
+      "persistent_keepalive": 25,
+      "web_port": 8080
+    }
   ]
 }
 ```
@@ -58,12 +68,22 @@ on a specific disk.
   "wireguard": {
     "interface_name": "jnk0",
     "wg_ip": "10.99.0.42",
+    "endpoint": "example.com:51820",
     "listen_port": 51820,
     "mtu": 1420
   },
   "bootstrap_peers": [
-    "10.0.0.1:51820",
-    "example.com:51820"
+    "10.0.0.1:8080",
+    "example.com:8080"
+  ],
+  "wg_peers": [
+    {
+      "public_key": "BASE64_PUBLIC_KEY_HERE",
+      "endpoint": "10.0.0.1:51820",
+      "wg_ip": "10.99.0.2",
+      "persistent_keepalive": 25,
+      "web_port": 8080
+    }
   ]
 }
 ```
@@ -72,3 +92,4 @@ on a specific disk.
 
 * Always use a JSON array for `data_dirs` (even if it has just one entry).
 * Ensure every directory exists and is writable by the junkNAS process.
+* `bootstrap_peers` should point at the web server endpoints used for mesh sync.

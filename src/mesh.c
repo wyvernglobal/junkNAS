@@ -1,5 +1,5 @@
 /*
- * junkNAS - Mesh coordination + chunk replication helpers
+ * junkNAS - WireGuard mesh coordination + chunk replication helpers
  */
 
 #include "mesh.h"
@@ -13,38 +13,35 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
-#define MESH_HELLO       "JNK_HELLO"
-#define MESH_HELLO_ACK   "JNK_HELLO_ACK"
-#define MESH_MOUNTS_REQ  "JNK_MOUNTS_REQ"
-#define MESH_MOUNTS_RESP "JNK_MOUNTS_RESP"
-#define MESH_MAX_PACKET  4096
-#define MESH_MAX_PEERS   32
+#include <cjson/cJSON.h>
+
+#include "wireguard.h"
+
+#define MESH_MAX_PEERS   MAX_WG_PEERS
 #define MESH_CONNECT_TIMEOUT_SEC 1
+#define MESH_SYNC_INTERVAL_SEC 5
 
 typedef struct {
-    char host[MAX_ENDPOINT_LEN];
-    uint16_t wg_port;
+    char wg_ip[16];
     uint16_t web_port;
-    time_t last_seen;
 } mesh_peer_t;
 
 struct junknas_mesh {
     junknas_config_t *config;
-    int udp_fd;
     pthread_t listener;
     pthread_mutex_t lock;
     int stop;
     int active;
     int standalone;
-    mesh_peer_t peers[MESH_MAX_PEERS];
-    size_t peer_count;
+    uint64_t last_applied_peers_updated_at;
 };
+
+static int mesh_apply_wireguard(struct junknas_mesh *mesh);
 
 static int parse_endpoint(const char *endpoint, char *host, size_t host_len, uint16_t *port) {
     if (!endpoint || !host || !port) return -1;
@@ -84,38 +81,96 @@ static int resolve_addr(const char *host, uint16_t port, int socktype,
     return 0;
 }
 
-static int mesh_sendto(struct junknas_mesh *mesh, const char *host, uint16_t port, const char *payload) {
-    if (!mesh || !host || !payload) return -1;
+static char *http_request_body(const char *host, uint16_t port, const char *request,
+                               const char *body, size_t body_len, int *out_status) {
     struct sockaddr_storage addr;
     socklen_t addr_len = 0;
-    if (resolve_addr(host, port, SOCK_DGRAM, &addr, &addr_len) != 0) return -1;
-    ssize_t sent = sendto(mesh->udp_fd, payload, strlen(payload), 0,
-                          (struct sockaddr *)&addr, addr_len);
-    return (sent >= 0) ? 0 : -1;
-}
+    if (resolve_addr(host, port, SOCK_STREAM, &addr, &addr_len) != 0) return NULL;
 
-static void mesh_record_peer(struct junknas_mesh *mesh,
-                             const char *host,
-                             uint16_t wg_port,
-                             uint16_t web_port) {
-    if (!mesh || !host) return;
-    pthread_mutex_lock(&mesh->lock);
-    for (size_t i = 0; i < mesh->peer_count; i++) {
-        if (strcmp(mesh->peers[i].host, host) == 0 && mesh->peers[i].wg_port == wg_port) {
-            if (web_port != 0) mesh->peers[i].web_port = web_port;
-            mesh->peers[i].last_seen = time(NULL);
-            pthread_mutex_unlock(&mesh->lock);
-            return;
+    int fd = socket(addr.ss_family, SOCK_STREAM, 0);
+    if (fd < 0) return NULL;
+
+    if (connect(fd, (struct sockaddr *)&addr, addr_len) != 0) {
+        close(fd);
+        return NULL;
+    }
+
+    if (send(fd, request, strlen(request), 0) < 0) {
+        close(fd);
+        return NULL;
+    }
+    if (body && body_len > 0) {
+        if (send(fd, body, body_len, 0) < 0) {
+            close(fd);
+            return NULL;
         }
     }
-    if (mesh->peer_count < MESH_MAX_PEERS) {
-        mesh_peer_t *peer = &mesh->peers[mesh->peer_count++];
-        snprintf(peer->host, sizeof(peer->host), "%s", host);
-        peer->wg_port = wg_port;
-        peer->web_port = web_port;
-        peer->last_seen = time(NULL);
+
+    char buf[4096];
+    char header_buf[8192 + 1];
+    size_t header_used = 0;
+    int status = 0;
+    int header_done = 0;
+    char *out = NULL;
+    size_t out_len = 0;
+
+    while (1) {
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+
+        if (!header_done) {
+            size_t to_copy = (size_t)n;
+            if (header_used + to_copy > sizeof(header_buf)) {
+                to_copy = sizeof(header_buf) - header_used;
+            }
+            memcpy(header_buf + header_used, buf, to_copy);
+            header_used += to_copy;
+
+            char *header_end = NULL;
+            for (size_t i = 0; i + 3 < header_used; i++) {
+                if (header_buf[i] == '\r' && header_buf[i + 1] == '\n' &&
+                    header_buf[i + 2] == '\r' && header_buf[i + 3] == '\n') {
+                    header_end = header_buf + i + 4;
+                    size_t header_len = i + 4;
+                    if (header_len < sizeof(header_buf)) {
+                        header_buf[header_len] = '\0';
+                    } else {
+                        header_buf[sizeof(header_buf) - 1] = '\0';
+                    }
+                    char *line_end = strstr(header_buf, "\r\n");
+                    if (line_end) {
+                        *line_end = '\0';
+                        (void)sscanf(header_buf, "HTTP/%*s %d", &status);
+                    }
+                    header_done = 1;
+                    size_t body_part = header_used - header_len;
+                    if (body_part > 0) {
+                        char *new_out = realloc(out, out_len + body_part + 1);
+                        if (!new_out) break;
+                        out = new_out;
+                        memcpy(out + out_len, header_end, body_part);
+                        out_len += body_part;
+                        out[out_len] = '\0';
+                    }
+                    break;
+                }
+            }
+        } else {
+            char *new_out = realloc(out, out_len + (size_t)n + 1);
+            if (!new_out) break;
+            out = new_out;
+            memcpy(out + out_len, buf, (size_t)n);
+            out_len += (size_t)n;
+            out[out_len] = '\0';
+        }
     }
-    pthread_mutex_unlock(&mesh->lock);
+
+    close(fd);
+    if (out_status) *out_status = status;
+    if (!out) {
+        out = calloc(1, 1);
+    }
+    return out;
 }
 
 static int mesh_mount_points_contains(const junknas_config_t *config, const char *mount_point) {
@@ -128,80 +183,12 @@ static int mesh_mount_points_contains(const junknas_config_t *config, const char
 
 static void mesh_ensure_local_mount(struct junknas_mesh *mesh) {
     if (!mesh || !mesh->config) return;
-    pthread_mutex_lock(&mesh->lock);
+    junknas_config_lock(mesh->config);
     if (!mesh_mount_points_contains(mesh->config, mesh->config->mount_point)) {
         (void)junknas_config_add_data_mount_point(mesh->config, mesh->config->mount_point);
         mesh->config->data_mount_points_updated_at = (uint64_t)time(NULL);
     }
-    pthread_mutex_unlock(&mesh->lock);
-}
-
-static void mesh_send_mounts_resp(struct junknas_mesh *mesh,
-                                  struct sockaddr_storage *addr,
-                                  socklen_t addr_len) {
-    if (!mesh || !addr) return;
-
-    char payload[MESH_MAX_PACKET];
-    pthread_mutex_lock(&mesh->lock);
-    uint64_t updated = mesh->config->data_mount_points_updated_at;
-    int count = mesh->config->data_mount_point_count;
-    int written = snprintf(payload, sizeof(payload), "%s %llu %d\n",
-                           MESH_MOUNTS_RESP,
-                           (unsigned long long)updated,
-                           count);
-    for (int i = 0; i < count && written > 0 && (size_t)written < sizeof(payload); i++) {
-        int n = snprintf(payload + written, sizeof(payload) - (size_t)written,
-                         "%s\n", mesh->config->data_mount_points[i]);
-        if (n < 0) break;
-        written += n;
-    }
-    pthread_mutex_unlock(&mesh->lock);
-
-    if (written > 0) {
-        (void)sendto(mesh->udp_fd, payload, (size_t)written, 0,
-                     (struct sockaddr *)addr, addr_len);
-    }
-}
-
-static void mesh_request_mounts(struct junknas_mesh *mesh,
-                                const char *host,
-                                uint16_t port,
-                                uint64_t since) {
-    char payload[128];
-    snprintf(payload, sizeof(payload), "%s %llu\n", MESH_MOUNTS_REQ,
-             (unsigned long long)since);
-    (void)mesh_sendto(mesh, host, port, payload);
-}
-
-static void mesh_handle_mounts_resp(struct junknas_mesh *mesh, const char *payload) {
-    if (!mesh || !payload) return;
-    char *copy = strdup(payload);
-    if (!copy) return;
-
-    char *saveptr = NULL;
-    char *line = strtok_r(copy, "\n", &saveptr);
-    if (!line) { free(copy); return; }
-
-    unsigned long long updated = 0;
-    int count = 0;
-    if (sscanf(line, "%*s %llu %d", &updated, &count) != 2) {
-        free(copy);
-        return;
-    }
-
-    pthread_mutex_lock(&mesh->lock);
-    if (updated > mesh->config->data_mount_points_updated_at) {
-        mesh->config->data_mount_point_count = 0;
-        for (int i = 0; i < count; i++) {
-            char *entry = strtok_r(NULL, "\n", &saveptr);
-            if (!entry) break;
-            (void)junknas_config_add_data_mount_point(mesh->config, entry);
-        }
-        mesh->config->data_mount_points_updated_at = (uint64_t)updated;
-    }
-    pthread_mutex_unlock(&mesh->lock);
-
-    free(copy);
+    junknas_config_unlock(mesh->config);
 }
 
 static void mesh_mark_active(struct junknas_mesh *mesh) {
@@ -212,98 +199,444 @@ static void mesh_mark_active(struct junknas_mesh *mesh) {
     pthread_mutex_unlock(&mesh->lock);
 }
 
-static void mesh_extract_host(const struct sockaddr_storage *addr, char *host, size_t host_len) {
-    if (!addr || !host || host_len == 0) return;
-    host[0] = '\0';
-    void *src = NULL;
-    if (addr->ss_family == AF_INET) {
-        src = &((struct sockaddr_in *)addr)->sin_addr;
-    } else if (addr->ss_family == AF_INET6) {
-        src = &((struct sockaddr_in6 *)addr)->sin6_addr;
+static int mesh_peer_from_json(cJSON *obj, junknas_wg_peer_t *peer) {
+    if (!cJSON_IsObject(obj) || !peer) return -1;
+    junknas_wg_peer_t out = {0};
+
+    cJSON *pub = cJSON_GetObjectItemCaseSensitive(obj, "public_key");
+    if (cJSON_IsString(pub) && pub->valuestring) {
+        snprintf(out.public_key, sizeof(out.public_key), "%s", pub->valuestring);
     }
-    if (src) {
-        (void)inet_ntop(addr->ss_family, src, host, (socklen_t)host_len);
+    cJSON *psk = cJSON_GetObjectItemCaseSensitive(obj, "preshared_key");
+    if (cJSON_IsString(psk) && psk->valuestring) {
+        snprintf(out.preshared_key, sizeof(out.preshared_key), "%s", psk->valuestring);
     }
+    cJSON *endpoint = cJSON_GetObjectItemCaseSensitive(obj, "endpoint");
+    if (cJSON_IsString(endpoint) && endpoint->valuestring) {
+        snprintf(out.endpoint, sizeof(out.endpoint), "%s", endpoint->valuestring);
+    }
+    cJSON *wg_ip = cJSON_GetObjectItemCaseSensitive(obj, "wg_ip");
+    if (cJSON_IsString(wg_ip) && wg_ip->valuestring) {
+        snprintf(out.wg_ip, sizeof(out.wg_ip), "%s", wg_ip->valuestring);
+    }
+    cJSON *keepalive = cJSON_GetObjectItemCaseSensitive(obj, "persistent_keepalive");
+    if (cJSON_IsNumber(keepalive) && keepalive->valuedouble >= 0) {
+        out.persistent_keepalive = (uint16_t)keepalive->valuedouble;
+    }
+    cJSON *web_port = cJSON_GetObjectItemCaseSensitive(obj, "web_port");
+    if (cJSON_IsNumber(web_port) && web_port->valuedouble > 0 && web_port->valuedouble < 65536) {
+        out.web_port = (uint16_t)web_port->valuedouble;
+    }
+
+    if (out.public_key[0] == '\0' || out.wg_ip[0] == '\0') return -1;
+    *peer = out;
+    return 0;
+}
+
+static int mesh_peer_equal(const junknas_wg_peer_t *a, const junknas_wg_peer_t *b) {
+    if (!a || !b) return 0;
+    if (strcmp(a->public_key, b->public_key) != 0) return 0;
+    if (strcmp(a->preshared_key, b->preshared_key) != 0) return 0;
+    if (strcmp(a->endpoint, b->endpoint) != 0) return 0;
+    if (strcmp(a->wg_ip, b->wg_ip) != 0) return 0;
+    if (a->persistent_keepalive != b->persistent_keepalive) return 0;
+    if (a->web_port != b->web_port) return 0;
+    return 1;
+}
+
+static cJSON *mesh_peer_to_json(const junknas_wg_peer_t *peer) {
+    if (!peer) return NULL;
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) return NULL;
+    cJSON_AddStringToObject(obj, "public_key", peer->public_key);
+    cJSON_AddStringToObject(obj, "preshared_key", peer->preshared_key);
+    cJSON_AddStringToObject(obj, "endpoint", peer->endpoint);
+    cJSON_AddStringToObject(obj, "wg_ip", peer->wg_ip);
+    cJSON_AddNumberToObject(obj, "persistent_keepalive", (double)peer->persistent_keepalive);
+    cJSON_AddNumberToObject(obj, "web_port", (double)peer->web_port);
+    return obj;
+}
+
+static int mesh_update_from_json(struct junknas_mesh *mesh, const char *payload) {
+    if (!mesh || !payload) return -1;
+
+    cJSON *root = cJSON_Parse(payload);
+    if (!root) return -1;
+
+    int changed = 0;
+    junknas_config_t *config = mesh->config;
+
+    junknas_wg_peer_t incoming[MESH_MAX_PEERS];
+    int incoming_count = 0;
+
+    cJSON *peers = cJSON_GetObjectItemCaseSensitive(root, "peers");
+    if (cJSON_IsArray(peers)) {
+        int n = cJSON_GetArraySize(peers);
+        for (int i = 0; i < n && incoming_count < MESH_MAX_PEERS; i++) {
+            cJSON *entry = cJSON_GetArrayItem(peers, i);
+            junknas_wg_peer_t peer = {0};
+            if (mesh_peer_from_json(entry, &peer) == 0) {
+                incoming[incoming_count++] = peer;
+            }
+        }
+    }
+
+    cJSON *self = cJSON_GetObjectItemCaseSensitive(root, "self");
+    if (cJSON_IsObject(self) && incoming_count < MESH_MAX_PEERS) {
+        junknas_wg_peer_t peer = {0};
+        if (mesh_peer_from_json(self, &peer) == 0) {
+            incoming[incoming_count++] = peer;
+        }
+    }
+
+    uint64_t remote_updated = 0;
+    cJSON *updated = cJSON_GetObjectItemCaseSensitive(root, "updated_at");
+    if (cJSON_IsNumber(updated) && updated->valuedouble >= 0) {
+        remote_updated = (uint64_t)updated->valuedouble;
+    }
+
+    junknas_config_lock(config);
+    const char *local_pub = config->wg.public_key;
+    uint64_t local_updated = config->wg_peers_updated_at;
+
+    junknas_wg_peer_t filtered[MESH_MAX_PEERS];
+    int filtered_count = 0;
+    for (int i = 0; i < incoming_count; i++) {
+        if (local_pub[0] != '\0' && strcmp(local_pub, incoming[i].public_key) == 0) {
+            continue;
+        }
+        filtered[filtered_count++] = incoming[i];
+    }
+
+    if (remote_updated >= local_updated && remote_updated != 0) {
+        int diff = (config->wg_peer_count != filtered_count);
+        if (!diff) {
+            for (int i = 0; i < filtered_count; i++) {
+                if (!mesh_peer_equal(&config->wg_peers[i], &filtered[i])) {
+                    diff = 1;
+                    break;
+                }
+            }
+        }
+        if (diff) {
+            if (junknas_config_set_wg_peers(config, filtered, filtered_count) == 0) {
+                changed = 1;
+            }
+        }
+        if (remote_updated > local_updated) {
+            config->wg_peers_updated_at = remote_updated;
+            changed = 1;
+        }
+    } else {
+        for (int i = 0; i < filtered_count; i++) {
+            int rc = junknas_config_upsert_wg_peer(config, &filtered[i]);
+            if (rc == 1) changed = 1;
+        }
+    }
+
+    cJSON *mounts_updated = cJSON_GetObjectItemCaseSensitive(root, "mounts_updated_at");
+    uint64_t remote_mounts_updated = 0;
+    if (cJSON_IsNumber(mounts_updated) && mounts_updated->valuedouble >= 0) {
+        remote_mounts_updated = (uint64_t)mounts_updated->valuedouble;
+    }
+    if (remote_mounts_updated > config->data_mount_points_updated_at) {
+        cJSON *mounts = cJSON_GetObjectItemCaseSensitive(root, "mount_points");
+        if (cJSON_IsArray(mounts)) {
+            config->data_mount_point_count = 0;
+            int n = cJSON_GetArraySize(mounts);
+            for (int i = 0; i < n && config->data_mount_point_count < MAX_DATA_MOUNT_POINTS; i++) {
+                cJSON *entry = cJSON_GetArrayItem(mounts, i);
+                if (cJSON_IsString(entry) && entry->valuestring) {
+                    (void)junknas_config_add_data_mount_point(config, entry->valuestring);
+                }
+            }
+            config->data_mount_points_updated_at = remote_mounts_updated;
+            changed = 1;
+        }
+    }
+
+    junknas_config_unlock(config);
+    cJSON_Delete(root);
+    return changed;
+}
+
+static char *mesh_build_sync_payload(junknas_config_t *config) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return NULL;
+
+    cJSON_AddNumberToObject(root, "updated_at", (double)config->wg_peers_updated_at);
+    cJSON_AddNumberToObject(root, "mounts_updated_at", (double)config->data_mount_points_updated_at);
+
+    cJSON *self = cJSON_CreateObject();
+    if (!self) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    cJSON_AddStringToObject(self, "public_key", config->wg.public_key);
+    cJSON_AddStringToObject(self, "endpoint", config->wg.endpoint);
+    cJSON_AddStringToObject(self, "wg_ip", config->wg.wg_ip);
+    cJSON_AddNumberToObject(self, "web_port", (double)config->web_port);
+    cJSON_AddNumberToObject(self, "persistent_keepalive", 0);
+    cJSON_AddNumberToObject(self, "listen_port", (double)config->wg.listen_port);
+    cJSON_AddItemToObject(root, "self", self);
+
+    cJSON *peers = cJSON_CreateArray();
+    if (!peers) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    cJSON_AddItemToObject(root, "peers", peers);
+    for (int i = 0; i < config->wg_peer_count; i++) {
+        cJSON *entry = mesh_peer_to_json(&config->wg_peers[i]);
+        if (entry) cJSON_AddItemToArray(peers, entry);
+    }
+
+    cJSON *mounts = cJSON_CreateArray();
+    if (!mounts) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    cJSON_AddItemToObject(root, "mount_points", mounts);
+    for (int i = 0; i < config->data_mount_point_count; i++) {
+        cJSON_AddItemToArray(mounts, cJSON_CreateString(config->data_mount_points[i]));
+    }
+
+    char *printed = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return printed;
+}
+
+static int mesh_sync_with_peer(struct junknas_mesh *mesh, const char *endpoint) {
+    char host[MAX_ENDPOINT_LEN];
+    uint16_t port = 0;
+    if (parse_endpoint(endpoint, host, sizeof(host), &port) != 0) return -1;
+
+    junknas_config_lock(mesh->config);
+    char *payload = mesh_build_sync_payload(mesh->config);
+    junknas_config_unlock(mesh->config);
+    if (!payload) return -1;
+
+    char request[512];
+    size_t payload_len = strlen(payload);
+    snprintf(request, sizeof(request),
+             "POST /mesh/peers HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n",
+             host, payload_len);
+
+    int status = 0;
+    char *body = http_request_body(host, port, request, payload, payload_len, &status);
+    free(payload);
+    if (!body) return -1;
+
+    int changed = 0;
+    if (status >= 200 && status < 300) {
+        if (body[0] != '\0') {
+            changed = mesh_update_from_json(mesh, body);
+        }
+        mesh_mark_active(mesh);
+    }
+    free(body);
+
+    if (changed > 0) {
+        junknas_config_lock(mesh->config);
+        (void)junknas_config_save(mesh->config, mesh->config->config_file_path);
+        junknas_config_unlock(mesh->config);
+        (void)mesh_apply_wireguard(mesh);
+        junknas_config_lock(mesh->config);
+        mesh->last_applied_peers_updated_at = mesh->config->wg_peers_updated_at;
+        junknas_config_unlock(mesh->config);
+        mesh_mark_active(mesh);
+    }
+
+    return 0;
+}
+
+static void mesh_free_wg_peers(wg_peer *peer) {
+    while (peer) {
+        wg_peer *next = peer->next_peer;
+        wg_allowedip *allowed = peer->first_allowedip;
+        while (allowed) {
+            wg_allowedip *next_allowed = allowed->next_allowedip;
+            free(allowed);
+            allowed = next_allowed;
+        }
+        free(peer);
+        peer = next;
+    }
+}
+
+static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
+    if (!mesh || !mesh->config) return -1;
+
+    junknas_config_lock(mesh->config);
+    junknas_wg_peer_t peers[MESH_MAX_PEERS];
+    int peer_count = mesh->config->wg_peer_count;
+    if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
+    memcpy(peers, mesh->config->wg_peers, sizeof(junknas_wg_peer_t) * (size_t)peer_count);
+    char iface[32];
+    snprintf(iface, sizeof(iface), "%s", mesh->config->wg.interface_name);
+    char private_key_b64[MAX_WG_KEY_LEN];
+    snprintf(private_key_b64, sizeof(private_key_b64), "%s", mesh->config->wg.private_key);
+    uint16_t listen_port = mesh->config->wg.listen_port;
+    junknas_config_unlock(mesh->config);
+
+    wg_device *existing = NULL;
+    if (wg_get_device(&existing, iface) != 0) {
+        (void)wg_add_device(iface);
+    }
+    if (existing) wg_free_device(existing);
+
+    wg_device dev;
+    memset(&dev, 0, sizeof(dev));
+    snprintf(dev.name, sizeof(dev.name), "%s", iface);
+    dev.flags = WGDEVICE_HAS_PRIVATE_KEY | WGDEVICE_HAS_LISTEN_PORT | WGDEVICE_REPLACE_PEERS;
+    dev.listen_port = listen_port;
+
+    if (wg_key_from_base64(dev.private_key, private_key_b64) != 0) {
+        return -1;
+    }
+
+    wg_peer *first_peer = NULL;
+    wg_peer *last_peer = NULL;
+
+    for (int i = 0; i < peer_count; i++) {
+        wg_peer *peer = calloc(1, sizeof(*peer));
+        if (!peer) continue;
+
+        peer->flags = WGPEER_HAS_PUBLIC_KEY | WGPEER_REPLACE_ALLOWEDIPS;
+        if (wg_key_from_base64(peer->public_key, peers[i].public_key) != 0) {
+            free(peer);
+            continue;
+        }
+
+        if (peers[i].preshared_key[0] != '\0') {
+            if (wg_key_from_base64(peer->preshared_key, peers[i].preshared_key) == 0) {
+                peer->flags |= WGPEER_HAS_PRESHARED_KEY;
+            }
+        }
+
+        if (peers[i].persistent_keepalive > 0) {
+            peer->persistent_keepalive_interval = peers[i].persistent_keepalive;
+            peer->flags |= WGPEER_HAS_PERSISTENT_KEEPALIVE_INTERVAL;
+        }
+
+        if (peers[i].endpoint[0] != '\0') {
+            char host[MAX_ENDPOINT_LEN];
+            uint16_t port = 0;
+            if (parse_endpoint(peers[i].endpoint, host, sizeof(host), &port) == 0) {
+                struct sockaddr_storage addr;
+                socklen_t addr_len = 0;
+                if (resolve_addr(host, port, SOCK_DGRAM, &addr, &addr_len) == 0) {
+                    memcpy(&peer->endpoint.addr, &addr, addr_len);
+                }
+            }
+        }
+
+        struct in_addr ip4;
+        if (inet_pton(AF_INET, peers[i].wg_ip, &ip4) == 1) {
+            wg_allowedip *allowed = calloc(1, sizeof(*allowed));
+            if (allowed) {
+                allowed->family = AF_INET;
+                allowed->ip4 = ip4;
+                allowed->cidr = 32;
+                peer->first_allowedip = allowed;
+                peer->last_allowedip = allowed;
+            }
+        }
+
+        if (!first_peer) {
+            first_peer = peer;
+        } else {
+            last_peer->next_peer = peer;
+        }
+        last_peer = peer;
+    }
+
+    dev.first_peer = first_peer;
+    dev.last_peer = last_peer;
+
+    int rc = wg_set_device(&dev);
+    mesh_free_wg_peers(first_peer);
+    return rc == 0 ? 0 : -1;
+}
+
+static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
+    if (!mesh || !mesh->config) return -1;
+
+    junknas_config_lock(mesh->config);
+    wg_key private_key;
+    wg_key public_key;
+    bool changed = false;
+
+    if (mesh->config->wg.private_key[0] == '\0' ||
+        wg_key_from_base64(private_key, mesh->config->wg.private_key) != 0) {
+        wg_generate_private_key(private_key);
+        wg_key_b64_string priv_b64;
+        wg_key_to_base64(priv_b64, private_key);
+        snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s", priv_b64);
+        changed = true;
+    }
+
+    wg_generate_public_key(public_key, private_key);
+    wg_key_b64_string pub_b64;
+    wg_key_to_base64(pub_b64, public_key);
+    if (strcmp(mesh->config->wg.public_key, pub_b64) != 0) {
+        snprintf(mesh->config->wg.public_key, sizeof(mesh->config->wg.public_key), "%s", pub_b64);
+        changed = true;
+    }
+
+    if (changed) {
+        (void)junknas_config_save(mesh->config, mesh->config->config_file_path);
+    }
+    junknas_config_unlock(mesh->config);
+    return 0;
+}
+
+static void mesh_refresh_active(struct junknas_mesh *mesh) {
+    if (!mesh || !mesh->config) return;
+    junknas_config_lock(mesh->config);
+    int active = (mesh->config->wg_peer_count > 0);
+    junknas_config_unlock(mesh->config);
+    pthread_mutex_lock(&mesh->lock);
+    mesh->active = active;
+    pthread_mutex_unlock(&mesh->lock);
 }
 
 static void *mesh_listener_thread(void *arg) {
     struct junknas_mesh *mesh = (struct junknas_mesh *)arg;
-    char buf[MESH_MAX_PACKET + 1];
 
     while (!mesh->stop) {
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(mesh->udp_fd, &readfds);
-        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
-
-        int rc = select(mesh->udp_fd + 1, &readfds, NULL, NULL, &tv);
-        if (rc <= 0) continue;
-
-        struct sockaddr_storage addr;
-        socklen_t addr_len = sizeof(addr);
-        ssize_t got = recvfrom(mesh->udp_fd, buf, MESH_MAX_PACKET, 0,
-                               (struct sockaddr *)&addr, &addr_len);
-        if (got <= 0) continue;
-        buf[got] = '\0';
-
-        char host[MAX_ENDPOINT_LEN];
-        mesh_extract_host(&addr, host, sizeof(host));
-        uint16_t peer_port = 0;
-        if (addr.ss_family == AF_INET) {
-            peer_port = ntohs(((struct sockaddr_in *)&addr)->sin_port);
-        } else if (addr.ss_family == AF_INET6) {
-            peer_port = ntohs(((struct sockaddr_in6 *)&addr)->sin6_port);
+        int did_sync = 0;
+        junknas_config_lock(mesh->config);
+        int peer_count = mesh->config->bootstrap_peer_count;
+        char peers[MAX_BOOTSTRAP_PEERS][MAX_ENDPOINT_LEN];
+        for (int i = 0; i < peer_count; i++) {
+            snprintf(peers[i], sizeof(peers[i]), "%s", mesh->config->bootstrap_peers[i]);
         }
+        junknas_config_unlock(mesh->config);
 
-        if (strncmp(buf, MESH_HELLO, strlen(MESH_HELLO)) == 0) {
-            unsigned long long web_port = 0;
-            unsigned long long mounts_updated = 0;
-            if (sscanf(buf, "JNK_HELLO %llu %llu", &web_port, &mounts_updated) == 2) {
-                mesh_record_peer(mesh, host, peer_port, (uint16_t)web_port);
-                mesh_mark_active(mesh);
-
-                char reply[128];
-                pthread_mutex_lock(&mesh->lock);
-                unsigned long long local_updated = (unsigned long long)mesh->config->data_mount_points_updated_at;
-                pthread_mutex_unlock(&mesh->lock);
-                snprintf(reply, sizeof(reply), "%s %u %llu\n",
-                         MESH_HELLO_ACK, mesh->config->web_port, local_updated);
-                (void)sendto(mesh->udp_fd, reply, strlen(reply), 0,
-                             (struct sockaddr *)&addr, addr_len);
-
-                if (mounts_updated > local_updated) {
-                    mesh_request_mounts(mesh, host, peer_port, local_updated);
-                }
+        for (int i = 0; i < peer_count; i++) {
+            if (mesh_sync_with_peer(mesh, peers[i]) == 0) {
+                did_sync = 1;
             }
-            continue;
         }
 
-        if (strncmp(buf, MESH_HELLO_ACK, strlen(MESH_HELLO_ACK)) == 0) {
-            unsigned long long web_port = 0;
-            unsigned long long mounts_updated = 0;
-            if (sscanf(buf, "JNK_HELLO_ACK %llu %llu", &web_port, &mounts_updated) == 2) {
-                mesh_record_peer(mesh, host, peer_port, (uint16_t)web_port);
-                mesh_mark_active(mesh);
+        uint64_t peers_updated_at = 0;
+        junknas_config_lock(mesh->config);
+        peers_updated_at = mesh->config->wg_peers_updated_at;
+        junknas_config_unlock(mesh->config);
 
-                pthread_mutex_lock(&mesh->lock);
-                unsigned long long local_updated = (unsigned long long)mesh->config->data_mount_points_updated_at;
-                pthread_mutex_unlock(&mesh->lock);
-                if (mounts_updated > local_updated) {
-                    mesh_request_mounts(mesh, host, peer_port, local_updated);
-                }
+        if (peers_updated_at != mesh->last_applied_peers_updated_at) {
+            if (mesh_apply_wireguard(mesh) == 0) {
+                mesh->last_applied_peers_updated_at = peers_updated_at;
             }
-            continue;
         }
 
-        if (strncmp(buf, MESH_MOUNTS_REQ, strlen(MESH_MOUNTS_REQ)) == 0) {
-            mesh_mark_active(mesh);
-            mesh_send_mounts_resp(mesh, &addr, addr_len);
-            continue;
+        if (!did_sync) {
+            mesh_refresh_active(mesh);
         }
 
-        if (strncmp(buf, MESH_MOUNTS_RESP, strlen(MESH_MOUNTS_RESP)) == 0) {
-            mesh_handle_mounts_resp(mesh, buf);
-            continue;
+        for (int i = 0; i < MESH_SYNC_INTERVAL_SEC && !mesh->stop; i++) {
+            sleep(1);
         }
     }
 
@@ -391,23 +724,27 @@ int junknas_mesh_fetch_chunk(junknas_mesh_t *mesh, const char *hashhex, const ch
     if (!mesh || !hashhex || !dest_path) return -1;
     if (!junknas_mesh_is_active(mesh)) return -1;
 
-    pthread_mutex_lock(&mesh->lock);
-    size_t peer_count = mesh->peer_count;
+    junknas_config_lock(mesh->config);
     mesh_peer_t peers[MESH_MAX_PEERS];
-    memcpy(peers, mesh->peers, sizeof(peers));
-    pthread_mutex_unlock(&mesh->lock);
+    int peer_count = mesh->config->wg_peer_count;
+    if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
+    for (int i = 0; i < peer_count; i++) {
+        snprintf(peers[i].wg_ip, sizeof(peers[i].wg_ip), "%s", mesh->config->wg_peers[i].wg_ip);
+        peers[i].web_port = mesh->config->wg_peers[i].web_port ?
+            mesh->config->wg_peers[i].web_port : mesh->config->web_port;
+    }
+    junknas_config_unlock(mesh->config);
 
-    for (size_t i = 0; i < peer_count; i++) {
-        uint16_t web_port = peers[i].web_port ? peers[i].web_port : mesh->config->web_port;
+    for (int i = 0; i < peer_count; i++) {
         char request[512];
         snprintf(request, sizeof(request),
                  "GET /chunks/%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
-                 hashhex, peers[i].host);
+                 hashhex, peers[i].wg_ip);
 
         FILE *out = fopen(dest_path, "wb");
         if (!out) continue;
         int status = 0;
-        int rc = http_request(peers[i].host, web_port, request, NULL, 0, out, &status);
+        int rc = http_request(peers[i].wg_ip, peers[i].web_port, request, NULL, 0, out, &status);
         fclose(out);
 
         if (rc == 0) {
@@ -426,19 +763,23 @@ int junknas_mesh_replicate_chunk(junknas_mesh_t *mesh,
     if (!mesh || !hashhex || !data || len == 0) return -1;
     if (!junknas_mesh_is_active(mesh)) return -1;
 
-    pthread_mutex_lock(&mesh->lock);
-    size_t peer_count = mesh->peer_count;
+    junknas_config_lock(mesh->config);
     mesh_peer_t peers[MESH_MAX_PEERS];
-    memcpy(peers, mesh->peers, sizeof(peers));
-    pthread_mutex_unlock(&mesh->lock);
+    int peer_count = mesh->config->wg_peer_count;
+    if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
+    for (int i = 0; i < peer_count; i++) {
+        snprintf(peers[i].wg_ip, sizeof(peers[i].wg_ip), "%s", mesh->config->wg_peers[i].wg_ip);
+        peers[i].web_port = mesh->config->wg_peers[i].web_port ?
+            mesh->config->wg_peers[i].web_port : mesh->config->web_port;
+    }
+    junknas_config_unlock(mesh->config);
 
-    for (size_t i = 0; i < peer_count; i++) {
-        uint16_t web_port = peers[i].web_port ? peers[i].web_port : mesh->config->web_port;
+    for (int i = 0; i < peer_count; i++) {
         char request[512];
         snprintf(request, sizeof(request),
                  "POST /chunks/%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n",
-                 hashhex, peers[i].host, len);
-        (void)http_request(peers[i].host, web_port, request, data, len, NULL, NULL);
+                 hashhex, peers[i].wg_ip, len);
+        (void)http_request(peers[i].wg_ip, peers[i].web_port, request, data, len, NULL, NULL);
     }
 
     return 0;
@@ -452,15 +793,6 @@ int junknas_mesh_is_active(const junknas_mesh_t *mesh) {
     return active;
 }
 
-static void mesh_send_hello(struct junknas_mesh *mesh, const char *host, uint16_t port) {
-    char payload[128];
-    pthread_mutex_lock(&mesh->lock);
-    unsigned long long mounts_updated = (unsigned long long)mesh->config->data_mount_points_updated_at;
-    pthread_mutex_unlock(&mesh->lock);
-    snprintf(payload, sizeof(payload), "%s %u %llu\n", MESH_HELLO, mesh->config->web_port, mounts_updated);
-    (void)mesh_sendto(mesh, host, port, payload);
-}
-
 junknas_mesh_t *junknas_mesh_start(junknas_config_t *config) {
     if (!config) return NULL;
 
@@ -470,43 +802,29 @@ junknas_mesh_t *junknas_mesh_start(junknas_config_t *config) {
     mesh->config = config;
     pthread_mutex_init(&mesh->lock, NULL);
 
-    mesh->udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (mesh->udp_fd < 0) {
-        free(mesh);
-        return NULL;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port = htons(config->wg.listen_port ? config->wg.listen_port : DEFAULT_WG_PORT);
-
-    if (bind(mesh->udp_fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        close(mesh->udp_fd);
-        free(mesh);
-        return NULL;
-    }
-
     mesh_ensure_local_mount(mesh);
 
+    if (mesh_ensure_wg_keys(mesh) != 0) {
+        pthread_mutex_destroy(&mesh->lock);
+        free(mesh);
+        return NULL;
+    }
+
+    (void)mesh_apply_wireguard(mesh);
+    junknas_config_lock(mesh->config);
+    mesh->last_applied_peers_updated_at = mesh->config->wg_peers_updated_at;
+    junknas_config_unlock(mesh->config);
+
     if (pthread_create(&mesh->listener, NULL, mesh_listener_thread, mesh) != 0) {
-        close(mesh->udp_fd);
+        pthread_mutex_destroy(&mesh->lock);
         free(mesh);
         return NULL;
     }
 
     if (config->bootstrap_peer_count == 0) {
         mesh->standalone = 1;
+        mesh_refresh_active(mesh);
         return mesh;
-    }
-
-    for (int i = 0; i < config->bootstrap_peer_count; i++) {
-        char host[MAX_ENDPOINT_LEN];
-        uint16_t port = 0;
-        if (parse_endpoint(config->bootstrap_peers[i], host, sizeof(host), &port) == 0) {
-            mesh_send_hello(mesh, host, port);
-        }
     }
 
     time_t start = time(NULL);
@@ -531,7 +849,6 @@ void junknas_mesh_stop(junknas_mesh_t *mesh) {
     if (mesh->listener) {
         pthread_join(mesh->listener, NULL);
     }
-    if (mesh->udp_fd >= 0) close(mesh->udp_fd);
     pthread_mutex_destroy(&mesh->lock);
     free(mesh);
 }

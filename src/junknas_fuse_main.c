@@ -30,9 +30,9 @@ static void print_usage(const char *argv0) {
             "Usage:\n"
             "  %s <config.json>\n"
             "  %s <config.json> bootstrap-peers list\n"
-            "  %s <config.json> bootstrap-peers add <ip:port>\n"
+            "  %s <config.json> bootstrap-peers add <host:port>\n"
             "  %s <config.json> bootstrap-peers delete <index>\n"
-            "  %s <config.json> bootstrap-peers edit <index> <ip:port>\n",
+            "  %s <config.json> bootstrap-peers edit <index> <host:port>\n",
             argv0, argv0, argv0, argv0, argv0);
 }
 
@@ -46,10 +46,27 @@ static int parse_uint_index(const char *text, int *out_index) {
     return 0;
 }
 
-static int validate_ipv4(const char *host) {
+static int validate_host(const char *host) {
     if (!host || host[0] == '\0') return -1;
-    int parts = 0;
+    int has_alpha = 0;
     const char *ptr = host;
+    while (*ptr) {
+        if (!((*ptr >= 'a' && *ptr <= 'z') ||
+              (*ptr >= 'A' && *ptr <= 'Z') ||
+              (*ptr >= '0' && *ptr <= '9') ||
+              *ptr == '.' || *ptr == '-')) {
+            return -1;
+        }
+        if ((*ptr >= 'a' && *ptr <= 'z') || (*ptr >= 'A' && *ptr <= 'Z')) {
+            has_alpha = 1;
+        }
+        ptr++;
+    }
+    if (has_alpha) return 0;
+
+    /* Validate IPv4 if it's numeric only */
+    int parts = 0;
+    ptr = host;
     while (*ptr) {
         if (parts >= 4) return -1;
         if (*ptr < '0' || *ptr > '9') return -1;
@@ -83,7 +100,7 @@ static int validate_peer_endpoint(const char *endpoint) {
     memcpy(host, endpoint, host_len);
     host[host_len] = '\0';
 
-    if (validate_ipv4(host) != 0) return -1;
+    if (validate_host(host) != 0) return -1;
 
     char *end = NULL;
     long port = strtol(colon + 1, &end, 10);
@@ -139,7 +156,7 @@ static int handle_bootstrap_peers_command(junknas_config_t *cfg,
             return 2;
         }
         if (validate_peer_endpoint(argv[2]) != 0) {
-            fprintf(stderr, "Invalid peer endpoint '%s'. Use <ip:port>.\n", argv[2]);
+            fprintf(stderr, "Invalid peer endpoint '%s'. Use <host:port>.\n", argv[2]);
             return 2;
         }
         if (junknas_config_add_bootstrap_peer(cfg, argv[2]) != 0) {
@@ -177,7 +194,7 @@ static int handle_bootstrap_peers_command(junknas_config_t *cfg,
             return 1;
         }
         if (validate_peer_endpoint(argv[3]) != 0) {
-            fprintf(stderr, "Invalid peer endpoint '%s'. Use <ip:port>.\n", argv[3]);
+            fprintf(stderr, "Invalid peer endpoint '%s'. Use <host:port>.\n", argv[3]);
             return 2;
         }
         (void)snprintf(cfg->bootstrap_peers[index - 1],

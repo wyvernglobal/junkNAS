@@ -21,6 +21,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <cjson/cJSON.h>
+
 #define WEB_BACKLOG 16
 #define WEB_BUF_SIZE 8192
 
@@ -86,6 +88,16 @@ static void send_text(int fd, int code, const char *body) {
     if (body) send(fd, body, len, 0);
 }
 
+static void send_json(int fd, int code, const char *body) {
+    char header[256];
+    size_t len = body ? strlen(body) : 0;
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 %d OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+             code, len);
+    send_all(fd, header);
+    if (body) send(fd, body, len, 0);
+}
+
 static void send_html_header(int fd, const char *title) {
     char header[256];
     snprintf(header, sizeof(header),
@@ -99,6 +111,172 @@ static void send_html_header(int fd, const char *title) {
 
 static void send_html_footer(int fd) {
     send_all(fd, "</body></html>");
+}
+
+static int parse_peer_json(cJSON *obj, junknas_wg_peer_t *peer) {
+    if (!cJSON_IsObject(obj) || !peer) return -1;
+    junknas_wg_peer_t out = {0};
+
+    cJSON *pub = cJSON_GetObjectItemCaseSensitive(obj, "public_key");
+    if (cJSON_IsString(pub) && pub->valuestring) {
+        snprintf(out.public_key, sizeof(out.public_key), "%s", pub->valuestring);
+    }
+    cJSON *psk = cJSON_GetObjectItemCaseSensitive(obj, "preshared_key");
+    if (cJSON_IsString(psk) && psk->valuestring) {
+        snprintf(out.preshared_key, sizeof(out.preshared_key), "%s", psk->valuestring);
+    }
+    cJSON *endpoint = cJSON_GetObjectItemCaseSensitive(obj, "endpoint");
+    if (cJSON_IsString(endpoint) && endpoint->valuestring) {
+        snprintf(out.endpoint, sizeof(out.endpoint), "%s", endpoint->valuestring);
+    }
+    cJSON *wg_ip = cJSON_GetObjectItemCaseSensitive(obj, "wg_ip");
+    if (cJSON_IsString(wg_ip) && wg_ip->valuestring) {
+        snprintf(out.wg_ip, sizeof(out.wg_ip), "%s", wg_ip->valuestring);
+    }
+    cJSON *keepalive = cJSON_GetObjectItemCaseSensitive(obj, "persistent_keepalive");
+    if (cJSON_IsNumber(keepalive) && keepalive->valuedouble >= 0) {
+        out.persistent_keepalive = (uint16_t)keepalive->valuedouble;
+    }
+    cJSON *web_port = cJSON_GetObjectItemCaseSensitive(obj, "web_port");
+    if (cJSON_IsNumber(web_port) && web_port->valuedouble > 0 && web_port->valuedouble < 65536) {
+        out.web_port = (uint16_t)web_port->valuedouble;
+    }
+
+    if (out.public_key[0] == '\0' || out.wg_ip[0] == '\0') return -1;
+    *peer = out;
+    return 0;
+}
+
+static cJSON *peer_to_json(const junknas_wg_peer_t *peer) {
+    if (!peer) return NULL;
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) return NULL;
+    cJSON_AddStringToObject(obj, "public_key", peer->public_key);
+    cJSON_AddStringToObject(obj, "preshared_key", peer->preshared_key);
+    cJSON_AddStringToObject(obj, "endpoint", peer->endpoint);
+    cJSON_AddStringToObject(obj, "wg_ip", peer->wg_ip);
+    cJSON_AddNumberToObject(obj, "persistent_keepalive", (double)peer->persistent_keepalive);
+    cJSON_AddNumberToObject(obj, "web_port", (double)peer->web_port);
+    return obj;
+}
+
+static void respond_mesh_state(int fd, junknas_config_t *config) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        send_status(fd, 500, "Error");
+        return;
+    }
+
+    junknas_config_lock(config);
+    cJSON_AddNumberToObject(root, "updated_at", (double)config->wg_peers_updated_at);
+    cJSON_AddNumberToObject(root, "mounts_updated_at", (double)config->data_mount_points_updated_at);
+
+    cJSON *self = cJSON_CreateObject();
+    if (self) {
+        cJSON_AddStringToObject(self, "public_key", config->wg.public_key);
+        cJSON_AddStringToObject(self, "endpoint", config->wg.endpoint);
+        cJSON_AddStringToObject(self, "wg_ip", config->wg.wg_ip);
+        cJSON_AddNumberToObject(self, "web_port", (double)config->web_port);
+        cJSON_AddNumberToObject(self, "persistent_keepalive", 0);
+        cJSON_AddNumberToObject(self, "listen_port", (double)config->wg.listen_port);
+        cJSON_AddItemToObject(root, "self", self);
+    }
+
+    cJSON *peers = cJSON_CreateArray();
+    if (peers) {
+        for (int i = 0; i < config->wg_peer_count; i++) {
+            cJSON *peer = peer_to_json(&config->wg_peers[i]);
+            if (peer) cJSON_AddItemToArray(peers, peer);
+        }
+        cJSON_AddItemToObject(root, "peers", peers);
+    }
+
+    cJSON *mounts = cJSON_CreateArray();
+    if (mounts) {
+        for (int i = 0; i < config->data_mount_point_count; i++) {
+            cJSON_AddItemToArray(mounts, cJSON_CreateString(config->data_mount_points[i]));
+        }
+        cJSON_AddItemToObject(root, "mount_points", mounts);
+    }
+    junknas_config_unlock(config);
+
+    char *printed = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!printed) {
+        send_status(fd, 500, "Error");
+        return;
+    }
+    send_json(fd, 200, printed);
+    free(printed);
+}
+
+static int merge_mesh_payload(junknas_config_t *config, const char *payload) {
+    if (!payload) return -1;
+    cJSON *root = cJSON_Parse(payload);
+    if (!root) return -1;
+
+    int peers_changed = 0;
+    int mounts_changed = 0;
+    time_t now = time(NULL);
+
+    junknas_config_lock(config);
+    const char *local_pub = config->wg.public_key;
+
+    cJSON *self = cJSON_GetObjectItemCaseSensitive(root, "self");
+    if (cJSON_IsObject(self)) {
+        junknas_wg_peer_t peer = {0};
+        if (parse_peer_json(self, &peer) == 0) {
+            if (local_pub[0] == '\0' || strcmp(local_pub, peer.public_key) != 0) {
+                int rc = junknas_config_upsert_wg_peer(config, &peer);
+                if (rc == 1) peers_changed = 1;
+            }
+        }
+    }
+
+    cJSON *peers = cJSON_GetObjectItemCaseSensitive(root, "peers");
+    if (cJSON_IsArray(peers)) {
+        int n = cJSON_GetArraySize(peers);
+        for (int i = 0; i < n; i++) {
+            cJSON *entry = cJSON_GetArrayItem(peers, i);
+            junknas_wg_peer_t peer = {0};
+            if (parse_peer_json(entry, &peer) != 0) continue;
+            if (local_pub[0] != '\0' && strcmp(local_pub, peer.public_key) == 0) continue;
+            int rc = junknas_config_upsert_wg_peer(config, &peer);
+            if (rc == 1) peers_changed = 1;
+        }
+    }
+
+    cJSON *mounts_updated = cJSON_GetObjectItemCaseSensitive(root, "mounts_updated_at");
+    uint64_t remote_mounts_updated = 0;
+    if (cJSON_IsNumber(mounts_updated) && mounts_updated->valuedouble >= 0) {
+        remote_mounts_updated = (uint64_t)mounts_updated->valuedouble;
+    }
+    if (remote_mounts_updated > config->data_mount_points_updated_at) {
+        cJSON *mounts = cJSON_GetObjectItemCaseSensitive(root, "mount_points");
+        if (cJSON_IsArray(mounts)) {
+            config->data_mount_point_count = 0;
+            int n = cJSON_GetArraySize(mounts);
+            for (int i = 0; i < n && config->data_mount_point_count < MAX_DATA_MOUNT_POINTS; i++) {
+                cJSON *entry = cJSON_GetArrayItem(mounts, i);
+                if (cJSON_IsString(entry) && entry->valuestring) {
+                    (void)junknas_config_add_data_mount_point(config, entry->valuestring);
+                }
+            }
+            config->data_mount_points_updated_at = remote_mounts_updated;
+            mounts_changed = 1;
+        }
+    }
+
+    if (peers_changed) {
+        config->wg_peers_updated_at = (uint64_t)now;
+    }
+    if (peers_changed || mounts_changed) {
+        (void)junknas_config_save(config, config->config_file_path);
+    }
+    junknas_config_unlock(config);
+
+    cJSON_Delete(root);
+    return (peers_changed || mounts_changed) ? 1 : 0;
 }
 
 static void respond_mount_listing(int fd, junknas_config_t *config, const char *rel_path) {
@@ -261,6 +439,11 @@ static void handle_get(web_conn_t *conn, const char *path) {
         return;
     }
 
+    if (strcmp(path, "/mesh/peers") == 0) {
+        respond_mesh_state(conn->fd, conn->config);
+        return;
+    }
+
     send_status(conn->fd, 404, "Not Found");
 }
 
@@ -375,6 +558,15 @@ static void handle_connection(web_conn_t *conn) {
     }
 
     if (strcmp(method, "POST") == 0) {
+        if (strcmp(path, "/mesh/peers") == 0) {
+            int updated = merge_mesh_payload(conn->config, body);
+            if (updated >= 0) {
+                respond_mesh_state(conn->fd, conn->config);
+            } else {
+                send_status(conn->fd, 400, "Bad Request");
+            }
+            return;
+        }
         if (strncmp(path, "/chunks/", 8) == 0) {
             handle_post_chunk(conn, path + 8, buf, body, body_len);
             return;
