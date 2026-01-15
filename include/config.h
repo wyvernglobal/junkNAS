@@ -29,6 +29,7 @@
 #define MAX_NODE_ID_LEN         64
 #define MAX_BOOTSTRAP_PEERS     10      /* Max initial peers to connect to */
 #define MAX_ENDPOINT_LEN        256     /* For "hostname:port" strings */
+#define MAX_DATA_DIRS           8       /* Max chunk storage directories */
 
 
 /* ============================================================================
@@ -59,7 +60,9 @@ typedef struct {
     size_t max_storage_bytes;           /* Parsed value in bytes */
 
     /* File paths */
-    char data_dir[MAX_PATH_LEN];        /* Where chunks are stored */
+    char data_dir[MAX_PATH_LEN];        /* Primary metadata + chunk dir */
+    char data_dirs[MAX_DATA_DIRS][MAX_PATH_LEN]; /* Chunk store directories */
+    size_t data_dir_count;              /* Number of chunk store dirs */
     char mount_point[MAX_PATH_LEN];     /* Where FUSE mounts the filesystem */
     char config_file_path[MAX_PATH_LEN];/* Path to this config file */
 
