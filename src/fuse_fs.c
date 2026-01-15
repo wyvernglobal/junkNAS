@@ -194,6 +194,7 @@ typedef struct {
 } jnk_fuse_state_t;
 
 /* Per-open handle */
+typedef struct dirty_chunk dirty_chunk_t;
 typedef struct {
     char meta_path[MAX_PATH_LEN];
     size_t size;
@@ -205,7 +206,20 @@ typedef struct {
   size_t orig_size;
   size_t orig_chunk_count;
   char **orig_hashes;
+
+  /* Staged writes:
+   * We do NOT commit content-addressed chunks to disk on every small write().
+   * Instead, we stage per-chunk buffers here and commit once on release().
+   */
+  dirty_chunk_t *dirty_chunks;
 } jnk_file_handle_t;
+
+/* Dirty chunk node: full 1 MiB chunk buffer for a given index */
+struct dirty_chunk {
+    size_t idx;
+    uint8_t *data;              /* JNK_CHUNK_SIZE bytes */
+    struct dirty_chunk *next;
+};
 
 static jnk_fuse_state_t *get_state(void) {
     return (jnk_fuse_state_t *)fuse_get_context()->private_data;
@@ -882,6 +896,7 @@ static int jnk_create(const char *path, mode_t mode, struct fuse_file_info *fi) 
     h->chunk_count = 0;
     h->hashes = NULL;
     h->dirty = 0;
+    h->dirty_chunks = NULL;
 
     /* Original snapshot (what was on disk when opened) for refcount delta.
      * For create, the file is new: original is empty too.
@@ -918,6 +933,7 @@ static int jnk_open(const char *path, struct fuse_file_info *fi) {
         return -EIO;
     }
     h->dirty = 0;
+    h->dirty_chunks = NULL;
 
     /* Snapshot original for refcount diffing on release()
      *
@@ -934,6 +950,80 @@ static int jnk_open(const char *path, struct fuse_file_info *fi) {
 
     fi->fh = (uint64_t)(uintptr_t)h;
     return 0;
+}
+
+/* ------------------------- Dirty Chunk Cache --------------------------- */
+
+static dirty_chunk_t *dirty_find(jnk_file_handle_t *h, size_t idx) {
+    for (dirty_chunk_t *d = h->dirty_chunks; d; d = d->next) {
+        if (d->idx == idx) return d;
+    }
+    return NULL;
+}
+
+/* Load current chunk content into out buffer:
+ * - If chunk exists in manifest: read+verify from store then pad with zeros.
+ * - Else: zero-fill.
+ */
+static int load_chunk_into_buf(jnk_fuse_state_t *s, jnk_file_handle_t *h, size_t idx, uint8_t *out) {
+    if (idx < h->chunk_count && h->hashes[idx]) {
+        size_t got_len = 0;
+        int rc = read_chunk_verified(s, h->hashes[idx], out, JNK_CHUNK_SIZE, &got_len);
+        if (rc != 0) return -EIO;
+        if (got_len < JNK_CHUNK_SIZE) memset(out + got_len, 0, JNK_CHUNK_SIZE - got_len);
+        return 0;
+    }
+    memset(out, 0, JNK_CHUNK_SIZE);
+    return 0;
+}
+
+static int dirty_get_or_create(jnk_fuse_state_t *s, jnk_file_handle_t *h, size_t idx, dirty_chunk_t **out) {
+    dirty_chunk_t *d = dirty_find(h, idx);
+    if (d) { *out = d; return 0; }
+
+    /* Ensure hashes array covers idx so release() can update manifest cleanly */
+    if (ensure_hash_capacity(h, idx + 1) != 0) return -ENOMEM;
+
+    d = (dirty_chunk_t *)calloc(1, sizeof(*d));
+    if (!d) return -ENOMEM;
+
+    d->data = (uint8_t *)malloc(JNK_CHUNK_SIZE);
+    if (!d->data) { free(d); return -ENOMEM; }
+
+    int rc = load_chunk_into_buf(s, h, idx, d->data);
+    if (rc != 0) { free(d->data); free(d); return rc; }
+
+    d->idx = idx;
+    d->next = h->dirty_chunks;
+    h->dirty_chunks = d;
+
+    *out = d;
+    return 0;
+}
+
+static void dirty_free_all(jnk_file_handle_t *h) {
+    dirty_chunk_t *d = h->dirty_chunks;
+    while (d) {
+        dirty_chunk_t *n = d->next;
+        free(d->data);
+        free(d);
+        d = n;
+    }
+    h->dirty_chunks = NULL;
+}
+
+static void dirty_drop_from(jnk_file_handle_t *h, size_t keep_before) {
+    dirty_chunk_t **pp = &h->dirty_chunks;
+    while (*pp) {
+        dirty_chunk_t *cur = *pp;
+        if (cur->idx >= keep_before) {
+            *pp = cur->next;
+            free(cur->data);
+            free(cur);
+            continue;
+        }
+        pp = &cur->next;
+    }
 }
 
 
@@ -956,6 +1046,13 @@ static int jnk_read(const char *path, char *buf, size_t size, off_t off, struct 
         size_t want = size - done;
         size_t room = JNK_CHUNK_SIZE - in_off;
         if (want > room) want = room;
+
+        dirty_chunk_t *d = dirty_find(h, idx);
+        if (d) {
+            memcpy(buf + done, d->data + in_off, want);
+            done += want;
+            continue;
+        }
 
         /* Missing chunk hash => zeros (sparse) */
         if (idx >= h->chunk_count || !h->hashes[idx]) {
@@ -986,44 +1083,6 @@ static int jnk_read(const char *path, char *buf, size_t size, off_t off, struct 
     return (int)done;
 }
 
-/* Build an updated full-chunk buffer for a given index, apply partial write, then store by hash. */
-static int write_update_one_chunk(jnk_fuse_state_t *s, jnk_file_handle_t *h,
-                                 size_t idx, const uint8_t *wbuf, size_t wlen, size_t chunk_off) {
-    uint8_t chunk[JNK_CHUNK_SIZE];
-    size_t cur_len = 0;
-
-    /* Load existing if present, else zeros */
-    if (idx < h->chunk_count && h->hashes[idx]) {
-        int rc = read_chunk_verified(s, h->hashes[idx], chunk, sizeof(chunk), &cur_len);
-        if (rc != 0) return -EIO;
-        if (cur_len < JNK_CHUNK_SIZE) memset(chunk + cur_len, 0, JNK_CHUNK_SIZE - cur_len);
-    } else {
-        memset(chunk, 0, sizeof(chunk));
-    }
-
-    if (chunk_off + wlen > JNK_CHUNK_SIZE) return -EIO;
-    memcpy(chunk + chunk_off, wbuf, wlen);
-
-    /* Determine stored length: we store full chunks for simplicity (dedupe still works). */
-    size_t store_len = JNK_CHUNK_SIZE;
-
-    char hashhex[65];
-    sha256_buf_hex(chunk, store_len, hashhex);
-
-    int rc = store_put_chunk_if_missing(s, hashhex, chunk, store_len);
-    if (rc != 0) return rc; /* may be -ENOSPC */
-
-    if (ensure_hash_capacity(h, idx + 1) != 0) return -ENOMEM;
-    if (h->hashes[idx]) free(h->hashes[idx]);
-
-    h->hashes[idx] = (char *)malloc(65);
-    if (!h->hashes[idx]) return -ENOMEM;
-    memcpy(h->hashes[idx], hashhex, 65);
-
-    h->dirty = 1;
-    return 0;
-}
-
 static int jnk_write(const char *path, const char *buf, size_t size, off_t off, struct fuse_file_info *fi) {
     (void)path;
     jnk_fuse_state_t *s = get_state();
@@ -1040,8 +1099,12 @@ static int jnk_write(const char *path, const char *buf, size_t size, off_t off, 
         size_t room = JNK_CHUNK_SIZE - in_off;
         if (want > room) want = room;
 
-        int rc = write_update_one_chunk(s, h, idx, (const uint8_t *)buf + done, want, in_off);
-        if (rc != 0) return rc; /* -ENOSPC or -EIO */
+        dirty_chunk_t *d = NULL;
+        int rc = dirty_get_or_create(s, h, idx, &d);
+        if (rc != 0) return rc;
+        if (in_off + want > JNK_CHUNK_SIZE) return -EIO;
+        memcpy(d->data + in_off, buf + done, want);
+        h->dirty = 1;
 
         done += want;
     }
@@ -1077,6 +1140,7 @@ static int jnk_truncate(const char *path, off_t newsize, struct fuse_file_info *
             }
             /* keep chunk_count as-is; manifest will omit NULLs beyond needed */
         }
+        dirty_drop_from(h, needed);
         h->size = ns;
         h->dirty = 1;
         return 0;
@@ -1095,6 +1159,41 @@ static int jnk_release(const char *path, struct fuse_file_info *fi) {
   jnk_fuse_state_t *s = get_state();
   jnk_file_handle_t *h = (jnk_file_handle_t *)(uintptr_t)fi->fh;
   if (!h) return 0;
+
+  for (dirty_chunk_t *d = h->dirty_chunks; d; d = d->next) {
+    char hashhex[65];
+    sha256_buf_hex(d->data, JNK_CHUNK_SIZE, hashhex);
+    int rc = store_put_chunk_if_missing(s, hashhex, d->data, JNK_CHUNK_SIZE);
+    if (rc != 0) {
+      dirty_free_all(h);
+      free_hashes(h->orig_hashes, h->orig_chunk_count);
+      free_hashes(h->hashes, h->chunk_count);
+      free(h);
+      return rc;
+    }
+    if (ensure_hash_capacity(h, d->idx + 1) != 0) {
+      dirty_free_all(h);
+      free_hashes(h->orig_hashes, h->orig_chunk_count);
+      free_hashes(h->hashes, h->chunk_count);
+      free(h);
+      return -ENOMEM;
+    }
+    if (h->hashes[d->idx]) {
+      free(h->hashes[d->idx]);
+      h->hashes[d->idx] = NULL;
+    }
+    h->hashes[d->idx] = (char *)malloc(65);
+    if (!h->hashes[d->idx]) {
+      dirty_free_all(h);
+      free_hashes(h->orig_hashes, h->orig_chunk_count);
+      free_hashes(h->hashes, h->chunk_count);
+      free(h);
+      return -ENOMEM;
+    }
+    memcpy(h->hashes[d->idx], hashhex, 65);
+    h->dirty = 1;
+  }
+  dirty_free_all(h);
 
   /* If the manifest changed, write it, then update refs based on diff */
   if (h->dirty) {
