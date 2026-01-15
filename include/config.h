@@ -6,6 +6,7 @@
 #ifndef JUNKNAS_CONFIG_H
 #define JUNKNAS_CONFIG_H
 
+#include <pthread.h>
 #include <stddef.h>   /* for size_t */
 #include <stdint.h>   /* for uint16_t, etc. */
 
@@ -31,6 +32,7 @@
 #define MAX_ENDPOINT_LEN        256     /* For "hostname:port" strings */
 #define MAX_DATA_DIRS           8       /* Max chunk storage directories */
 #define MAX_DATA_MOUNT_POINTS   16      /* Max mesh mount points */
+#define MAX_WG_PEERS            64      /* Max WireGuard peers */
 
 
 /* ============================================================================
@@ -44,9 +46,19 @@ typedef struct {
     char private_key[MAX_WG_KEY_LEN];   /* Base64 WireGuard private key */
     char public_key[MAX_WG_KEY_LEN];    /* Base64 WireGuard public key */
     char wg_ip[16];                     /* IP within mesh, e.g., "10.99.0.5" */
+    char endpoint[MAX_ENDPOINT_LEN];    /* Public endpoint host:port */
     uint16_t listen_port;               /* UDP port for WireGuard */
     int mtu;                            /* MTU for the interface (0 = default) */
 } junknas_wg_config_t;
+
+typedef struct {
+    char public_key[MAX_WG_KEY_LEN];
+    char preshared_key[MAX_WG_KEY_LEN];
+    char endpoint[MAX_ENDPOINT_LEN];
+    char wg_ip[16];
+    uint16_t persistent_keepalive;
+    uint16_t web_port;
+} junknas_wg_peer_t;
 
 
 /* ============================================================================
@@ -78,6 +90,11 @@ typedef struct {
     int bootstrap_peer_count;           /* How many bootstrap peers are set */
     uint64_t bootstrap_peers_updated_at;/* Unix epoch seconds for mesh propagation */
 
+    /* WireGuard peers for full mesh sync */
+    junknas_wg_peer_t wg_peers[MAX_WG_PEERS];
+    int wg_peer_count;
+    uint64_t wg_peers_updated_at;
+
     /* Mesh data mount points (for cross-node discovery) */
     char data_mount_points[MAX_DATA_MOUNT_POINTS][MAX_PATH_LEN];
     int data_mount_point_count;
@@ -87,6 +104,8 @@ typedef struct {
     int verbose;                        /* Enable verbose logging? */
     int enable_fuse;                    /* Mount FUSE filesystem? */
     int daemon_mode;                    /* Run as background daemon? */
+
+    pthread_mutex_t lock;
 } junknas_config_t;
 
 
@@ -151,6 +170,24 @@ int junknas_config_add_bootstrap_peer(junknas_config_t *config, const char *endp
  * @return              0 on success, -1 if too many entries
  */
 int junknas_config_add_data_mount_point(junknas_config_t *config, const char *mount_point);
+
+/*
+ * Add or update a WireGuard peer by public key.
+ * Returns 1 if changed, 0 if no change, -1 on error.
+ */
+int junknas_config_upsert_wg_peer(junknas_config_t *config, const junknas_wg_peer_t *peer);
+
+/*
+ * Replace the WireGuard peers list with provided peers.
+ * Returns 0 on success, -1 on error.
+ */
+int junknas_config_set_wg_peers(junknas_config_t *config, const junknas_wg_peer_t *peers, int count);
+
+/*
+ * Lock/unlock helpers for shared config access.
+ */
+void junknas_config_lock(junknas_config_t *config);
+void junknas_config_unlock(junknas_config_t *config);
 
 /*
  * Parse human-readable size string to bytes

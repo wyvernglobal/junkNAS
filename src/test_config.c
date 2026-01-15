@@ -31,6 +31,7 @@ static void dump_config(const junknas_config_t *cfg) {
     printf("  WireGuard:\n");
     printf("    interface:     %s\n", cfg->wg.interface_name);
     printf("    wg_ip:         %s\n", cfg->wg.wg_ip);
+    printf("    endpoint:      %s\n", cfg->wg.endpoint[0] ? cfg->wg.endpoint : "(unset)");
     printf("    listen_port:   %u\n", cfg->wg.listen_port);
     printf("    mtu:           %d\n", cfg->wg.mtu);
     printf("    public_key:    %s\n", cfg->wg.public_key[0] ? "(set)" : "(empty)");
@@ -49,6 +50,13 @@ static void dump_config(const junknas_config_t *cfg) {
     }
     printf("  data_mount_points_updated_at: %llu\n",
            (unsigned long long)cfg->data_mount_points_updated_at);
+
+    printf("  wg_peers (%d):\n", cfg->wg_peer_count);
+    for (int i = 0; i < cfg->wg_peer_count; i++) {
+        printf("    - %s (%s)\n", cfg->wg_peers[i].public_key, cfg->wg_peers[i].wg_ip);
+    }
+    printf("  wg_peers_updated_at: %llu\n",
+           (unsigned long long)cfg->wg_peers_updated_at);
 }
 
 int main(int argc, char **argv) {

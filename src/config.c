@@ -34,6 +34,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -258,12 +259,66 @@ int junknas_config_add_data_mount_point(junknas_config_t *config, const char *mo
 void junknas_config_cleanup(junknas_config_t *config) {
     /* Currently everything is fixed-size buffers, so nothing to free.
      */
-    (void)config;
+    if (config) {
+        pthread_mutex_destroy(&config->lock);
+    }
+}
+
+void junknas_config_lock(junknas_config_t *config) {
+    if (!config) return;
+    pthread_mutex_lock(&config->lock);
+}
+
+void junknas_config_unlock(junknas_config_t *config) {
+    if (!config) return;
+    pthread_mutex_unlock(&config->lock);
+}
+
+static int wg_peer_equal(const junknas_wg_peer_t *a, const junknas_wg_peer_t *b) {
+    if (!a || !b) return 0;
+    if (strcmp(a->public_key, b->public_key) != 0) return 0;
+    if (strcmp(a->preshared_key, b->preshared_key) != 0) return 0;
+    if (strcmp(a->endpoint, b->endpoint) != 0) return 0;
+    if (strcmp(a->wg_ip, b->wg_ip) != 0) return 0;
+    if (a->persistent_keepalive != b->persistent_keepalive) return 0;
+    if (a->web_port != b->web_port) return 0;
+    return 1;
+}
+
+int junknas_config_upsert_wg_peer(junknas_config_t *config, const junknas_wg_peer_t *peer) {
+    if (!config || !peer || peer->public_key[0] == '\0') return -1;
+
+    for (int i = 0; i < config->wg_peer_count; i++) {
+        if (strcmp(config->wg_peers[i].public_key, peer->public_key) == 0) {
+            if (wg_peer_equal(&config->wg_peers[i], peer)) return 0;
+            config->wg_peers[i] = *peer;
+            return 1;
+        }
+    }
+
+    if (config->wg_peer_count >= MAX_WG_PEERS) {
+        return -1;
+    }
+
+    config->wg_peers[config->wg_peer_count++] = *peer;
+    return 1;
+}
+
+int junknas_config_set_wg_peers(junknas_config_t *config, const junknas_wg_peer_t *peers, int count) {
+    if (!config || !peers || count < 0 || count > MAX_WG_PEERS) return -1;
+
+    config->wg_peer_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (peers[i].public_key[0] == '\0') continue;
+        config->wg_peers[config->wg_peer_count++] = peers[i];
+    }
+    return 0;
 }
 
 static void set_defaults(junknas_config_t *config) {
     /* This function sets the full config structure to known defaults. */
     memset(config, 0, sizeof(*config));
+    pthread_mutex_init(&config->lock, NULL);
 
     /* Storage */
     (void)safe_strcpy(config->storage_size, sizeof(config->storage_size), DEFAULT_STORAGE_SIZE);
@@ -289,12 +344,17 @@ static void set_defaults(junknas_config_t *config) {
     config->wg.private_key[0] = '\0';
     config->wg.public_key[0] = '\0';
     (void)safe_strcpy(config->wg.wg_ip, sizeof(config->wg.wg_ip), "10.99.0.1");
+    config->wg.endpoint[0] = '\0';
     config->wg.listen_port = (uint16_t)DEFAULT_WG_PORT;
     config->wg.mtu = 0;
 
     /* Bootstrap list */
     config->bootstrap_peer_count = 0;
     config->bootstrap_peers_updated_at = 0;
+
+    /* WireGuard peers */
+    config->wg_peer_count = 0;
+    config->wg_peers_updated_at = 0;
 
     /* Mesh mount points */
     config->data_mount_point_count = 0;
@@ -343,6 +403,14 @@ int junknas_config_validate(const junknas_config_t *config) {
     }
     for (int i = 0; i < config->data_mount_point_count; i++) {
         if (config->data_mount_points[i][0] == '\0') return -1;
+    }
+
+    if (config->wg_peer_count < 0 || config->wg_peer_count > MAX_WG_PEERS) {
+        return -1;
+    }
+    for (int i = 0; i < config->wg_peer_count; i++) {
+        if (config->wg_peers[i].public_key[0] == '\0') return -1;
+        if (config->wg_peers[i].wg_ip[0] == '\0') return -1;
     }
 
     return 0;
@@ -453,6 +521,11 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
             (void)safe_strcpy(config->wg.wg_ip, sizeof(config->wg.wg_ip), ip->valuestring);
         }
 
+        cJSON *endpoint = cJSON_GetObjectItemCaseSensitive(wg, "endpoint");
+        if (cJSON_IsString(endpoint) && endpoint->valuestring) {
+            (void)safe_strcpy(config->wg.endpoint, sizeof(config->wg.endpoint), endpoint->valuestring);
+        }
+
         cJSON *lp = cJSON_GetObjectItemCaseSensitive(wg, "listen_port");
         if (cJSON_IsNumber(lp) && lp->valuedouble > 0 && lp->valuedouble < 65536) {
             config->wg.listen_port = (uint16_t)lp->valuedouble;
@@ -504,6 +577,52 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
         config->data_mount_points_updated_at = (uint64_t)mounts_updated_at->valuedouble;
     }
 
+    cJSON *wg_peers = cJSON_GetObjectItemCaseSensitive(root, "wg_peers");
+    if (cJSON_IsArray(wg_peers)) {
+        config->wg_peer_count = 0;
+        int n = cJSON_GetArraySize(wg_peers);
+        if (n > MAX_WG_PEERS) n = MAX_WG_PEERS;
+        for (int i = 0; i < n; i++) {
+            cJSON *p = cJSON_GetArrayItem(wg_peers, i);
+            if (!cJSON_IsObject(p)) continue;
+            junknas_wg_peer_t peer = {0};
+
+            cJSON *pub = cJSON_GetObjectItemCaseSensitive(p, "public_key");
+            if (cJSON_IsString(pub) && pub->valuestring) {
+                (void)safe_strcpy(peer.public_key, sizeof(peer.public_key), pub->valuestring);
+            }
+            cJSON *psk = cJSON_GetObjectItemCaseSensitive(p, "preshared_key");
+            if (cJSON_IsString(psk) && psk->valuestring) {
+                (void)safe_strcpy(peer.preshared_key, sizeof(peer.preshared_key), psk->valuestring);
+            }
+            cJSON *endpoint = cJSON_GetObjectItemCaseSensitive(p, "endpoint");
+            if (cJSON_IsString(endpoint) && endpoint->valuestring) {
+                (void)safe_strcpy(peer.endpoint, sizeof(peer.endpoint), endpoint->valuestring);
+            }
+            cJSON *wg_ip = cJSON_GetObjectItemCaseSensitive(p, "wg_ip");
+            if (cJSON_IsString(wg_ip) && wg_ip->valuestring) {
+                (void)safe_strcpy(peer.wg_ip, sizeof(peer.wg_ip), wg_ip->valuestring);
+            }
+            cJSON *keepalive = cJSON_GetObjectItemCaseSensitive(p, "persistent_keepalive");
+            if (cJSON_IsNumber(keepalive) && keepalive->valuedouble >= 0) {
+                peer.persistent_keepalive = (uint16_t)keepalive->valuedouble;
+            }
+            cJSON *web_port = cJSON_GetObjectItemCaseSensitive(p, "web_port");
+            if (cJSON_IsNumber(web_port) && web_port->valuedouble > 0 && web_port->valuedouble < 65536) {
+                peer.web_port = (uint16_t)web_port->valuedouble;
+            }
+
+            if (peer.public_key[0] != '\0' && peer.wg_ip[0] != '\0') {
+                config->wg_peers[config->wg_peer_count++] = peer;
+            }
+        }
+    }
+
+    cJSON *wg_peers_updated_at = cJSON_GetObjectItemCaseSensitive(root, "wg_peers_updated_at");
+    if (cJSON_IsNumber(wg_peers_updated_at) && wg_peers_updated_at->valuedouble >= 0) {
+        config->wg_peers_updated_at = (uint64_t)wg_peers_updated_at->valuedouble;
+    }
+
     cJSON_Delete(root);
     return 0;
 }
@@ -548,6 +667,7 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
     cJSON_AddStringToObject(wg, "private_key", config->wg.private_key);
     cJSON_AddStringToObject(wg, "public_key", config->wg.public_key);
     cJSON_AddStringToObject(wg, "wg_ip", config->wg.wg_ip);
+    cJSON_AddStringToObject(wg, "endpoint", config->wg.endpoint);
     cJSON_AddNumberToObject(wg, "listen_port", (double)config->wg.listen_port);
     cJSON_AddNumberToObject(wg, "mtu", (double)config->wg.mtu);
 
@@ -577,6 +697,31 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
     }
     cJSON_AddNumberToObject(root, "data_mount_points_updated_at",
                             (double)config->data_mount_points_updated_at);
+
+    /* WireGuard peers */
+    cJSON *wg_arr = cJSON_CreateArray();
+    if (!wg_arr) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    cJSON_AddItemToObject(root, "wg_peers", wg_arr);
+    for (int i = 0; i < config->wg_peer_count && i < MAX_WG_PEERS; i++) {
+        cJSON *peer = cJSON_CreateObject();
+        if (!peer) {
+            cJSON_Delete(root);
+            return -1;
+        }
+        cJSON_AddStringToObject(peer, "public_key", config->wg_peers[i].public_key);
+        cJSON_AddStringToObject(peer, "preshared_key", config->wg_peers[i].preshared_key);
+        cJSON_AddStringToObject(peer, "endpoint", config->wg_peers[i].endpoint);
+        cJSON_AddStringToObject(peer, "wg_ip", config->wg_peers[i].wg_ip);
+        cJSON_AddNumberToObject(peer, "persistent_keepalive",
+                                (double)config->wg_peers[i].persistent_keepalive);
+        cJSON_AddNumberToObject(peer, "web_port", (double)config->wg_peers[i].web_port);
+        cJSON_AddItemToArray(wg_arr, peer);
+    }
+    cJSON_AddNumberToObject(root, "wg_peers_updated_at",
+                            (double)config->wg_peers_updated_at);
 
     /* Render JSON */
     char *printed = cJSON_Print(root);
