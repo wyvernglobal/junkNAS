@@ -30,6 +30,7 @@
 #define MAX_BOOTSTRAP_PEERS     10      /* Max initial peers to connect to */
 #define MAX_ENDPOINT_LEN        256     /* For "hostname:port" strings */
 #define MAX_DATA_DIRS           8       /* Max chunk storage directories */
+#define MAX_DATA_MOUNT_POINTS   16      /* Max mesh mount points */
 
 
 /* ============================================================================
@@ -76,6 +77,11 @@ typedef struct {
     char bootstrap_peers[MAX_BOOTSTRAP_PEERS][MAX_ENDPOINT_LEN];
     int bootstrap_peer_count;           /* How many bootstrap peers are set */
     uint64_t bootstrap_peers_updated_at;/* Unix epoch seconds for mesh propagation */
+
+    /* Mesh data mount points (for cross-node discovery) */
+    char data_mount_points[MAX_DATA_MOUNT_POINTS][MAX_PATH_LEN];
+    int data_mount_point_count;
+    uint64_t data_mount_points_updated_at;
 
     /* Runtime flags */
     int verbose;                        /* Enable verbose logging? */
@@ -137,6 +143,14 @@ void junknas_config_cleanup(junknas_config_t *config);
  * @return              0 on success, -1 if too many peers
  */
 int junknas_config_add_bootstrap_peer(junknas_config_t *config, const char *endpoint);
+
+/*
+ * Add a data mount point to the configuration
+ * @param config        Pointer to config
+ * @param mount_point   Mount point path (string)
+ * @return              0 on success, -1 if too many entries
+ */
+int junknas_config_add_data_mount_point(junknas_config_t *config, const char *mount_point);
 
 /*
  * Parse human-readable size string to bytes

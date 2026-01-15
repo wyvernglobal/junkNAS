@@ -42,6 +42,13 @@ static void dump_config(const junknas_config_t *cfg) {
     }
     printf("  bootstrap_peers_updated_at: %llu\n",
            (unsigned long long)cfg->bootstrap_peers_updated_at);
+
+    printf("  data_mount_points (%d):\n", cfg->data_mount_point_count);
+    for (int i = 0; i < cfg->data_mount_point_count; i++) {
+        printf("    - %s\n", cfg->data_mount_points[i]);
+    }
+    printf("  data_mount_points_updated_at: %llu\n",
+           (unsigned long long)cfg->data_mount_points_updated_at);
 }
 
 int main(int argc, char **argv) {

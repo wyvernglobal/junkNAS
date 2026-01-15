@@ -238,6 +238,23 @@ int junknas_config_add_bootstrap_peer(junknas_config_t *config, const char *endp
     return 0;
 }
 
+int junknas_config_add_data_mount_point(junknas_config_t *config, const char *mount_point) {
+    if (!config || !mount_point) return -1;
+
+    if (config->data_mount_point_count < 0) config->data_mount_point_count = 0;
+
+    if (config->data_mount_point_count >= MAX_DATA_MOUNT_POINTS) {
+        return -1;
+    }
+
+    int idx = config->data_mount_point_count;
+
+    (void)safe_strcpy(config->data_mount_points[idx], MAX_PATH_LEN, mount_point);
+
+    config->data_mount_point_count++;
+    return 0;
+}
+
 void junknas_config_cleanup(junknas_config_t *config) {
     /* Currently everything is fixed-size buffers, so nothing to free.
      */
@@ -278,6 +295,10 @@ static void set_defaults(junknas_config_t *config) {
     /* Bootstrap list */
     config->bootstrap_peer_count = 0;
     config->bootstrap_peers_updated_at = 0;
+
+    /* Mesh mount points */
+    config->data_mount_point_count = 0;
+    config->data_mount_points_updated_at = 0;
 }
 
 int junknas_config_validate(const junknas_config_t *config) {
@@ -315,6 +336,13 @@ int junknas_config_validate(const junknas_config_t *config) {
     /* Optional: if bootstrap_peer_count > 0, ensure each peer is non-empty */
     for (int i = 0; i < config->bootstrap_peer_count; i++) {
         if (config->bootstrap_peers[i][0] == '\0') return -1;
+    }
+
+    if (config->data_mount_point_count < 0 || config->data_mount_point_count > MAX_DATA_MOUNT_POINTS) {
+        return -1;
+    }
+    for (int i = 0; i < config->data_mount_point_count; i++) {
+        if (config->data_mount_points[i][0] == '\0') return -1;
     }
 
     return 0;
@@ -456,6 +484,26 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
         config->bootstrap_peers_updated_at = (uint64_t)peers_updated_at->valuedouble;
     }
 
+    /* data_mount_points array */
+    cJSON *mounts = cJSON_GetObjectItemCaseSensitive(root, "data_mount_points");
+    if (cJSON_IsArray(mounts)) {
+        config->data_mount_point_count = 0;
+        int n = cJSON_GetArraySize(mounts);
+        if (n > MAX_DATA_MOUNT_POINTS) n = MAX_DATA_MOUNT_POINTS;
+
+        for (int i = 0; i < n; i++) {
+            cJSON *m = cJSON_GetArrayItem(mounts, i);
+            if (cJSON_IsString(m) && m->valuestring) {
+                (void)junknas_config_add_data_mount_point(config, m->valuestring);
+            }
+        }
+    }
+
+    cJSON *mounts_updated_at = cJSON_GetObjectItemCaseSensitive(root, "data_mount_points_updated_at");
+    if (cJSON_IsNumber(mounts_updated_at) && mounts_updated_at->valuedouble >= 0) {
+        config->data_mount_points_updated_at = (uint64_t)mounts_updated_at->valuedouble;
+    }
+
     cJSON_Delete(root);
     return 0;
 }
@@ -516,6 +564,19 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
     }
     cJSON_AddNumberToObject(root, "bootstrap_peers_updated_at",
                             (double)config->bootstrap_peers_updated_at);
+
+    /* data mount points */
+    cJSON *mount_arr = cJSON_CreateArray();
+    if (!mount_arr) {
+        cJSON_Delete(root);
+        return -1;
+    }
+    cJSON_AddItemToObject(root, "data_mount_points", mount_arr);
+    for (int i = 0; i < config->data_mount_point_count && i < MAX_DATA_MOUNT_POINTS; i++) {
+        cJSON_AddItemToArray(mount_arr, cJSON_CreateString(config->data_mount_points[i]));
+    }
+    cJSON_AddNumberToObject(root, "data_mount_points_updated_at",
+                            (double)config->data_mount_points_updated_at);
 
     /* Render JSON */
     char *printed = cJSON_Print(root);

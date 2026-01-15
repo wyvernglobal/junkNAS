@@ -22,6 +22,8 @@
 #include <time.h>
 #include "config.h"
 #include "fuse_fs.h"
+#include "mesh.h"
+#include "web_server.h"
 
 static void print_usage(const char *argv0) {
     fprintf(stderr,
@@ -218,9 +220,24 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    junknas_mesh_t *mesh = junknas_mesh_start(&cfg);
+    if (!mesh) {
+        fprintf(stderr, "Warning: failed to start mesh; running standalone.\n");
+    }
+
+    junknas_web_server_t *web = junknas_web_server_start(&cfg);
+    if (!web) {
+        fprintf(stderr, "Warning: failed to start web server on port %u.\n", cfg.web_port);
+    }
+
     /* We pass argc/argv to FUSE so you can add options later.
      * But note: FUSE will also see your config path argument.
      * That’s fine for now because we explicitly add cfg.mount_point.
      */
-    return (junknas_fuse_run(&cfg, argc, argv) == 0) ? 0 : 1;
+    int rc = (junknas_fuse_run(&cfg, mesh, argc, argv) == 0) ? 0 : 1;
+
+    if (web) junknas_web_server_stop(web);
+    if (mesh) junknas_mesh_stop(mesh);
+
+    return rc;
 }
