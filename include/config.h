@@ -102,7 +102,7 @@ typedef struct {
     junknas_wg_peer_t wg_peers[MAX_WG_PEERS];
     int wg_peer_count;
     uint64_t wg_peers_updated_at;
-    int wg_peer_status[MAX_WG_PEERS];  /* 1=reachable, 0=dead end, -1=unknown */
+    int wg_peer_status[MAX_WG_PEERS];  /* 1=connected, 0=unreachable, -1=connecting */
 
     /* Mesh data mount points (for cross-node discovery) */
     char data_mount_points[MAX_DATA_MOUNT_POINTS][MAX_PATH_LEN];
