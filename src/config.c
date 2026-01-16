@@ -836,10 +836,12 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
 
     if (should_write_private) {
         if (write_entire_file_atomic(private_key_path, config->wg.private_key) != 0) {
-            config_log_verbose(config, "config: failed to write private key to %s", private_key_path);
-            return -1;
+            config_log_verbose(config,
+                               "config: failed to write private key to %s (continuing without key file)",
+                               private_key_path);
+        } else {
+            config_log_verbose(config, "config: wrote WireGuard private key to %s", private_key_path);
         }
-        config_log_verbose(config, "config: wrote WireGuard private key to %s", private_key_path);
     }
 
     if (changed) {

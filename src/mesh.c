@@ -858,10 +858,12 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
 
     if (should_write_private) {
         if (write_entire_file_atomic(private_key_path, mesh->config->wg.private_key) != 0) {
-            mesh_log_verbose(mesh->config, "mesh: failed to write private key to %s", private_key_path);
-            return -1;
+            mesh_log_verbose(mesh->config,
+                             "mesh: failed to write private key to %s (continuing without key file)",
+                             private_key_path);
+        } else {
+            mesh_log_verbose(mesh->config, "mesh: wrote WireGuard private key to %s", private_key_path);
         }
-        mesh_log_verbose(mesh->config, "mesh: wrote WireGuard private key to %s", private_key_path);
     }
 
     if (changed) {
