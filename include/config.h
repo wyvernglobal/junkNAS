@@ -34,6 +34,9 @@
 #define MAX_DATA_MOUNT_POINTS   16      /* Max mesh mount points */
 #define MAX_WG_PEERS            64      /* Max WireGuard peers */
 
+#define NODE_STATE_NODE         "node"
+#define NODE_STATE_END          "end"
+
 
 /* ============================================================================
  * SECTION 2: WireGuard Configuration Structure
@@ -81,6 +84,9 @@ typedef struct {
 
     /* Network configuration */
     uint16_t web_port;                  /* HTTP web interface port */
+
+    /* Node role */
+    char node_state[8];                 /* "node" or "end" */
 
     /* WireGuard mesh configuration */
     junknas_wg_config_t wg;             /* Nested WireGuard config */

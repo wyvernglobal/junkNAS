@@ -23,6 +23,7 @@ static void dump_config(const junknas_config_t *cfg) {
     printf("  storage_size:    %s\n", cfg->storage_size);
     printf("  max_storage:     %zu bytes\n", cfg->max_storage_bytes);
     printf("  web_port:        %u\n", cfg->web_port);
+    printf("  node_state:      %s\n", cfg->node_state);
 
     printf("  verbose:         %d\n", cfg->verbose);
     printf("  enable_fuse:     %d\n", cfg->enable_fuse);

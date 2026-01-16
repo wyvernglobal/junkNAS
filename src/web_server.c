@@ -139,10 +139,6 @@ static int parse_peer_json(cJSON *obj, junknas_wg_peer_t *peer) {
     if (cJSON_IsString(pub) && pub->valuestring) {
         snprintf(out.public_key, sizeof(out.public_key), "%s", pub->valuestring);
     }
-    cJSON *psk = cJSON_GetObjectItemCaseSensitive(obj, "preshared_key");
-    if (cJSON_IsString(psk) && psk->valuestring) {
-        snprintf(out.preshared_key, sizeof(out.preshared_key), "%s", psk->valuestring);
-    }
     cJSON *endpoint = cJSON_GetObjectItemCaseSensitive(obj, "endpoint");
     if (cJSON_IsString(endpoint) && endpoint->valuestring) {
         snprintf(out.endpoint, sizeof(out.endpoint), "%s", endpoint->valuestring);
@@ -170,7 +166,6 @@ static cJSON *peer_to_json(const junknas_wg_peer_t *peer) {
     cJSON *obj = cJSON_CreateObject();
     if (!obj) return NULL;
     cJSON_AddStringToObject(obj, "public_key", peer->public_key);
-    cJSON_AddStringToObject(obj, "preshared_key", peer->preshared_key);
     cJSON_AddStringToObject(obj, "endpoint", peer->endpoint);
     cJSON_AddStringToObject(obj, "wg_ip", peer->wg_ip);
     cJSON_AddNumberToObject(obj, "persistent_keepalive", (double)peer->persistent_keepalive);
@@ -183,35 +178,40 @@ static cJSON *build_mesh_state_json(junknas_config_t *config) {
     if (!root) return NULL;
 
     junknas_config_lock(config);
-    cJSON_AddNumberToObject(root, "updated_at", (double)config->wg_peers_updated_at);
-    cJSON_AddNumberToObject(root, "mounts_updated_at", (double)config->data_mount_points_updated_at);
+    if (strcmp(config->node_state, NODE_STATE_NODE) == 0) {
+        cJSON_AddNumberToObject(root, "updated_at", (double)config->wg_peers_updated_at);
+        cJSON_AddNumberToObject(root, "mounts_updated_at", (double)config->data_mount_points_updated_at);
 
-    cJSON *self = cJSON_CreateObject();
-    if (self) {
-        cJSON_AddStringToObject(self, "public_key", config->wg.public_key);
-        cJSON_AddStringToObject(self, "endpoint", config->wg.endpoint);
-        cJSON_AddStringToObject(self, "wg_ip", config->wg.wg_ip);
-        cJSON_AddNumberToObject(self, "web_port", (double)config->web_port);
-        cJSON_AddNumberToObject(self, "persistent_keepalive", 0);
-        cJSON_AddNumberToObject(self, "listen_port", (double)config->wg.listen_port);
-        cJSON_AddItemToObject(root, "self", self);
-    }
-
-    cJSON *peers = cJSON_CreateArray();
-    if (peers) {
-        for (int i = 0; i < config->wg_peer_count; i++) {
-            cJSON *peer = peer_to_json(&config->wg_peers[i]);
-            if (peer) cJSON_AddItemToArray(peers, peer);
+        cJSON *self = cJSON_CreateObject();
+        if (self) {
+            cJSON_AddStringToObject(self, "public_key", config->wg.public_key);
+            cJSON_AddStringToObject(self, "endpoint", config->wg.endpoint);
+            cJSON_AddStringToObject(self, "wg_ip", config->wg.wg_ip);
+            cJSON_AddNumberToObject(self, "web_port", (double)config->web_port);
+            cJSON_AddNumberToObject(self, "persistent_keepalive", 0);
+            cJSON_AddNumberToObject(self, "listen_port", (double)config->wg.listen_port);
+            cJSON_AddItemToObject(root, "self", self);
         }
-        cJSON_AddItemToObject(root, "peers", peers);
-    }
 
-    cJSON *mounts = cJSON_CreateArray();
-    if (mounts) {
-        for (int i = 0; i < config->data_mount_point_count; i++) {
-            cJSON_AddItemToArray(mounts, cJSON_CreateString(config->data_mount_points[i]));
+        cJSON *peers = cJSON_CreateArray();
+        if (peers) {
+            for (int i = 0; i < config->wg_peer_count; i++) {
+                cJSON *peer = peer_to_json(&config->wg_peers[i]);
+                if (peer) cJSON_AddItemToArray(peers, peer);
+            }
+            cJSON_AddItemToObject(root, "peers", peers);
         }
-        cJSON_AddItemToObject(root, "mount_points", mounts);
+
+        cJSON *mounts = cJSON_CreateArray();
+        if (mounts) {
+            for (int i = 0; i < config->data_mount_point_count; i++) {
+                cJSON_AddItemToArray(mounts, cJSON_CreateString(config->data_mount_points[i]));
+            }
+            cJSON_AddItemToObject(root, "mount_points", mounts);
+        }
+    } else {
+        cJSON_AddNumberToObject(root, "updated_at", 0.0);
+        cJSON_AddNumberToObject(root, "mounts_updated_at", 0.0);
     }
     junknas_config_unlock(config);
     return root;
@@ -468,6 +468,7 @@ static void respond_mesh_config(int fd, junknas_config_t *config) {
         cJSON_AddItemToObject(root, "self", self);
     }
 
+    cJSON_AddStringToObject(root, "node_state", config->node_state);
     cJSON_AddNumberToObject(root, "bootstrap_peers_updated_at",
                             (double)config->bootstrap_peers_updated_at);
     cJSON *bootstrap = cJSON_CreateArray();
@@ -600,7 +601,14 @@ static void respond_mesh_ui(int fd) {
              "</style>");
     send_all(fd, "<h1>junkNAS mesh settings</h1>");
     send_all(fd, "<div id=\"mesh-role\" class=\"status\">Checking mesh status…</div>");
-    send_all(fd, "<section><h2>Local node</h2><div id=\"self-info\">Loading…</div></section>");
+    send_all(fd, "<section><h2>Local node</h2>"
+                  "<label>Node state "
+                  "<select id=\"node-state\">"
+                  "<option value=\"node\">Node (hosts WG server)</option>"
+                  "<option value=\"end\">End (no WG server)</option>"
+                  "</select>"
+                  "</label>"
+                  "<div id=\"self-info\">Loading…</div></section>");
     send_all(fd, "<section><h2>Sync new mesh</h2>"
                   "<p>Generate a join config for a new peer and share it securely.</p>"
                   "<div class=\"actions\">"
@@ -625,10 +633,9 @@ static void respond_mesh_ui(int fd) {
     send_all(fd, "<section><h2>WireGuard peers</h2>"
                   "<table id=\"wg-peers\">"
                   "<thead><tr>"
-                  "<th>Public key</th><th>Preshared key</th><th>Endpoint</th>"
-                  "<th>WG IP</th><th>Keepalive</th><th>Web port</th><th>Status</th><th></th>"
-                  "</tr></thead><tbody></tbody></table>"
-                  "<div class=\"actions\"><button id=\"add-wg\">Add peer</button></div></section>");
+                  "<th>Public key</th><th>Endpoint</th>"
+                  "<th>WG IP</th><th>Keepalive</th><th>Web port</th><th>Status</th>"
+                  "</tr></thead><tbody></tbody></table></section>");
     send_all(fd, "<div class=\"actions\">"
                   "<button id=\"save-config\">Save changes</button>"
                   "<span id=\"save-status\"></span>"
@@ -669,18 +676,12 @@ static void respond_mesh_ui(int fd) {
              "const row=document.createElement('tr');"
              "const status=statusMap.wg[index]||'unknown';"
              "row.innerHTML=`"
-             "<td><input data-field='public_key' value='${escapeHtml(peer.public_key||'')}'></td>"
-             "<td><input data-field='preshared_key' value='${escapeHtml(peer.preshared_key||'')}'></td>"
-             "<td><input data-field='endpoint' value='${escapeHtml(peer.endpoint||'')}'></td>"
-             "<td><input data-field='wg_ip' value='${escapeHtml(peer.wg_ip||'')}'></td>"
-             "<td><input data-field='persistent_keepalive' value='${escapeHtml(String(peer.persistent_keepalive||''))}'></td>"
-             "<td><input data-field='web_port' value='${escapeHtml(String(peer.web_port||''))}'></td>"
-             "<td><span class='badge'>${escapeHtml(status)}</span></td>"
-             "<td><button data-action='remove'>Remove</button></td>`;"
-             "row.querySelector('[data-action=\"remove\"]').addEventListener('click',()=>{"
-             "wgPeers.splice(index,1);"
-             "renderWgPeers();"
-             "});"
+             "<td>${escapeHtml(peer.public_key||'')}</td>"
+             "<td>${escapeHtml(peer.endpoint||'')}</td>"
+             "<td>${escapeHtml(peer.wg_ip||'')}</td>"
+             "<td>${escapeHtml(String(peer.persistent_keepalive||''))}</td>"
+             "<td>${escapeHtml(String(peer.web_port||''))}</td>"
+             "<td><span class='badge'>${escapeHtml(status)}</span></td>`;"
              "tbody.appendChild(row);"
              "});"
              "}"
@@ -688,6 +689,7 @@ static void respond_mesh_ui(int fd) {
              "const res=await fetch('/mesh/config');"
              "const data=await res.json();"
              "document.getElementById('bootstrap-peers').value=(data.bootstrap_peers||[]).join('\\n');"
+             "document.getElementById('node-state').value=data.node_state||'node';"
              "const self=data.self||{};"
              "selfEndpoint=self.endpoint||'';"
              "document.getElementById('self-info').innerHTML=`"
@@ -721,26 +723,10 @@ static void respond_mesh_ui(int fd) {
              "const bootstrapList=(data.bootstrap_peers||[]).map(p=>`<div><span class='badge'>${escapeHtml(p.status||'unknown')}</span> ${escapeHtml(p.endpoint||'')}</div>`).join('');"
              "document.getElementById('bootstrap-status').innerHTML=bootstrapList||'<em>No LAN peers.</em>';"
              "}"
-             "document.getElementById('add-wg').addEventListener('click',()=>{"
-             "wgPeers.push({public_key:'',preshared_key:'',endpoint:'',wg_ip:'',persistent_keepalive:0,web_port:0});"
-             "renderWgPeers();"
-             "});"
              "document.getElementById('save-config').addEventListener('click',async()=>{"
              "const bootstrap=document.getElementById('bootstrap-peers').value.split('\\n').map(v=>v.trim()).filter(Boolean);"
-             "const peers=[];"
-             "document.querySelectorAll('#wg-peers tbody tr').forEach(row=>{"
-             "const get=(field)=>row.querySelector(`[data-field='${field}']`).value.trim();"
-             "const peer={"
-             "public_key:get('public_key'),"
-             "preshared_key:get('preshared_key'),"
-             "endpoint:get('endpoint'),"
-             "wg_ip:get('wg_ip'),"
-             "persistent_keepalive:parseInt(get('persistent_keepalive')||'0',10)||0,"
-             "web_port:parseInt(get('web_port')||'0',10)||0"
-             "};"
-             "if(peer.public_key || peer.wg_ip){peers.push(peer);}"
-             "});"
-             "const res=await fetch('/mesh/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bootstrap_peers:bootstrap,wg_peers:peers})});"
+             "const nodeState=document.getElementById('node-state').value||'node';"
+             "const res=await fetch('/mesh/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bootstrap_peers:bootstrap,node_state:nodeState})});"
              "const msg=document.getElementById('save-status');"
              "if(res.ok){"
              "msg.textContent='Saved.';"
@@ -866,9 +852,11 @@ static int update_mesh_config(junknas_config_t *config, const char *payload) {
 
     junknas_wg_peer_t peers[MAX_WG_PEERS];
     int peer_count = 0;
+    int has_wg_peers = 0;
 
     cJSON *peer_arr = cJSON_GetObjectItemCaseSensitive(root, "wg_peers");
     if (cJSON_IsArray(peer_arr)) {
+        has_wg_peers = 1;
         int n = cJSON_GetArraySize(peer_arr);
         for (int i = 0; i < n && peer_count < MAX_WG_PEERS; i++) {
             cJSON *entry = cJSON_GetArrayItem(peer_arr, i);
@@ -913,11 +901,20 @@ static int update_mesh_config(junknas_config_t *config, const char *payload) {
     }
     config->bootstrap_peers_updated_at = (uint64_t)now;
 
-    (void)junknas_config_set_wg_peers(config, peers, peer_count);
-    for (int i = 0; i < config->wg_peer_count; i++) {
-        config->wg_peer_status[i] = -1;
+    if (has_wg_peers) {
+        (void)junknas_config_set_wg_peers(config, peers, peer_count);
+        for (int i = 0; i < config->wg_peer_count; i++) {
+            config->wg_peer_status[i] = -1;
+        }
+        config->wg_peers_updated_at = (uint64_t)now;
     }
-    config->wg_peers_updated_at = (uint64_t)now;
+
+    cJSON *node_state = cJSON_GetObjectItemCaseSensitive(root, "node_state");
+    if (cJSON_IsString(node_state) && node_state->valuestring &&
+        (strcmp(node_state->valuestring, NODE_STATE_NODE) == 0 ||
+         strcmp(node_state->valuestring, NODE_STATE_END) == 0)) {
+        snprintf(config->node_state, sizeof(config->node_state), "%s", node_state->valuestring);
+    }
     (void)junknas_config_save(config, config->config_file_path);
     junknas_config_unlock(config);
 
@@ -927,6 +924,10 @@ static int update_mesh_config(junknas_config_t *config, const char *payload) {
 
 static int respond_mesh_bootstrap(int fd, junknas_config_t *config) {
     if (!config) return -1;
+    if (strcmp(config->node_state, NODE_STATE_END) == 0) {
+        send_status(fd, 403, "Forbidden");
+        return -1;
+    }
     if (junknas_config_ensure_wg_keys(config) != 0) {
         send_status(fd, 500, "Error");
         return -1;
