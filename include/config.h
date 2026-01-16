@@ -89,11 +89,13 @@ typedef struct {
     char bootstrap_peers[MAX_BOOTSTRAP_PEERS][MAX_ENDPOINT_LEN];
     int bootstrap_peer_count;           /* How many bootstrap peers are set */
     uint64_t bootstrap_peers_updated_at;/* Unix epoch seconds for mesh propagation */
+    int bootstrap_peer_status[MAX_BOOTSTRAP_PEERS]; /* 1=reachable, 0=dead end, -1=unknown */
 
     /* WireGuard peers for full mesh sync */
     junknas_wg_peer_t wg_peers[MAX_WG_PEERS];
     int wg_peer_count;
     uint64_t wg_peers_updated_at;
+    int wg_peer_status[MAX_WG_PEERS];  /* 1=reachable, 0=dead end, -1=unknown */
 
     /* Mesh data mount points (for cross-node discovery) */
     char data_mount_points[MAX_DATA_MOUNT_POINTS][MAX_PATH_LEN];

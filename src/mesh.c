@@ -50,9 +50,13 @@ struct junknas_mesh {
     int active;
     int standalone;
     uint64_t last_applied_peers_updated_at;
+    time_t last_public_ip_check;
+    char last_public_ip[64];
 };
 
 static int mesh_apply_wireguard(struct junknas_mesh *mesh);
+static char *http_request_body(const char *host, uint16_t port, const char *request,
+                               const char *body, size_t body_len, int *out_status);
 
 static int read_entire_file(const char *path, char **out_buf, size_t *out_len) {
     FILE *f = NULL;
@@ -198,6 +202,12 @@ static int parse_endpoint(const char *endpoint, char *host, size_t host_len, uin
     return 0;
 }
 
+static int is_ipv4_address(const char *text) {
+    if (!text || text[0] == '\0') return 0;
+    struct in_addr addr;
+    return inet_pton(AF_INET, text, &addr) == 1;
+}
+
 static int resolve_addr(const char *host, uint16_t port, int socktype,
                         struct sockaddr_storage *out, socklen_t *out_len) {
     if (!host || !out || !out_len) return -1;
@@ -217,6 +227,83 @@ static int resolve_addr(const char *host, uint16_t port, int socktype,
     *out_len = (socklen_t)res->ai_addrlen;
     freeaddrinfo(res);
     return 0;
+}
+
+static int fetch_public_ip(char *out, size_t out_len) {
+    if (!out || out_len == 0) return -1;
+    out[0] = '\0';
+
+    const char *host = "ifconfig.io";
+    const char *path = "/ip";
+    char request[256];
+    snprintf(request, sizeof(request),
+             "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: junkNAS\r\nConnection: close\r\n\r\n",
+             path, host);
+
+    int status = 0;
+    char *body = http_request_body(host, 80, request, NULL, 0, &status);
+    if (!body) return -1;
+
+    int rc = -1;
+    if (status >= 200 && status < 300) {
+        char *start = body;
+        while (*start && isspace((unsigned char)*start)) start++;
+        char *end = start;
+        while (*end && !isspace((unsigned char)*end)) end++;
+        if (end > start) {
+            size_t len = (size_t)(end - start);
+            if (len < out_len) {
+                memcpy(out, start, len);
+                out[len] = '\0';
+                if (is_ipv4_address(out)) {
+                    rc = 0;
+                }
+            }
+        }
+    }
+    free(body);
+    return rc;
+}
+
+static int mesh_refresh_public_endpoint(struct junknas_mesh *mesh, int force) {
+    if (!mesh || !mesh->config) return -1;
+
+    char public_ip[64];
+    if (fetch_public_ip(public_ip, sizeof(public_ip)) != 0) {
+        return -1;
+    }
+
+    int changed = 0;
+    junknas_config_lock(mesh->config);
+
+    char host[MAX_ENDPOINT_LEN];
+    uint16_t port = 0;
+    int has_endpoint = (mesh->config->wg.endpoint[0] != '\0');
+    int parsed = has_endpoint ? parse_endpoint(mesh->config->wg.endpoint, host, sizeof(host), &port) : -1;
+    int host_is_ip = (parsed == 0) ? is_ipv4_address(host) : 0;
+
+    if (force || !has_endpoint) {
+        snprintf(mesh->config->wg.endpoint, sizeof(mesh->config->wg.endpoint), "%s:%u",
+                 public_ip, mesh->config->wg.listen_port);
+        changed = 1;
+    } else if (host_is_ip && strcmp(host, public_ip) != 0) {
+        snprintf(mesh->config->wg.endpoint, sizeof(mesh->config->wg.endpoint), "%s:%u",
+                 public_ip, mesh->config->wg.listen_port);
+        changed = 1;
+    }
+
+    if (strncmp(mesh->last_public_ip, public_ip, sizeof(mesh->last_public_ip)) != 0) {
+        snprintf(mesh->last_public_ip, sizeof(mesh->last_public_ip), "%s", public_ip);
+    }
+    junknas_config_unlock(mesh->config);
+
+    if (changed) {
+        junknas_config_lock(mesh->config);
+        (void)junknas_config_save(mesh->config, mesh->config->config_file_path);
+        junknas_config_unlock(mesh->config);
+    }
+
+    return changed;
 }
 
 static char *http_request_body(const char *host, uint16_t port, const char *request,
@@ -567,7 +654,8 @@ static int mesh_sync_with_peer(struct junknas_mesh *mesh, const char *endpoint) 
     if (!body) return -1;
 
     int changed = 0;
-    if (status >= 200 && status < 300) {
+    int ok = (status >= 200 && status < 300);
+    if (ok) {
         if (body[0] != '\0') {
             changed = mesh_update_from_json(mesh, body);
         }
@@ -586,7 +674,7 @@ static int mesh_sync_with_peer(struct junknas_mesh *mesh, const char *endpoint) 
         mesh_mark_active(mesh);
     }
 
-    return 0;
+    return ok ? 0 : -1;
 }
 
 static void mesh_free_wg_peers(wg_peer *peer) {
@@ -806,18 +894,46 @@ static void *mesh_listener_thread(void *arg) {
 
     while (!mesh->stop) {
         int did_sync = 0;
+        time_t now = time(NULL);
+        if (mesh->last_public_ip_check == 0 || now - mesh->last_public_ip_check >= 60) {
+            mesh->last_public_ip_check = now;
+            if (mesh_refresh_public_endpoint(mesh, 0) > 0) {
+                did_sync = 1;
+            }
+        }
+
         junknas_config_lock(mesh->config);
         int peer_count = mesh->config->bootstrap_peer_count;
         char peers[MAX_BOOTSTRAP_PEERS][MAX_ENDPOINT_LEN];
         for (int i = 0; i < peer_count; i++) {
             snprintf(peers[i], sizeof(peers[i]), "%s", mesh->config->bootstrap_peers[i]);
         }
+        int wg_peer_count = mesh->config->wg_peer_count;
+        uint16_t default_web_port = mesh->config->web_port;
+        junknas_wg_peer_t wg_peers[MESH_MAX_PEERS];
+        if (wg_peer_count > MESH_MAX_PEERS) wg_peer_count = MESH_MAX_PEERS;
+        for (int i = 0; i < wg_peer_count; i++) {
+            wg_peers[i] = mesh->config->wg_peers[i];
+        }
         junknas_config_unlock(mesh->config);
 
         for (int i = 0; i < peer_count; i++) {
-            if (mesh_sync_with_peer(mesh, peers[i]) == 0) {
-                did_sync = 1;
-            }
+            int rc = mesh_sync_with_peer(mesh, peers[i]);
+            junknas_config_lock(mesh->config);
+            mesh->config->bootstrap_peer_status[i] = (rc == 0) ? 1 : 0;
+            junknas_config_unlock(mesh->config);
+            if (rc == 0) did_sync = 1;
+        }
+
+        for (int i = 0; i < wg_peer_count; i++) {
+            uint16_t web_port = wg_peers[i].web_port ? wg_peers[i].web_port : default_web_port;
+            char endpoint[MAX_ENDPOINT_LEN];
+            snprintf(endpoint, sizeof(endpoint), "%s:%u", wg_peers[i].wg_ip, web_port);
+            int rc = mesh_sync_with_peer(mesh, endpoint);
+            junknas_config_lock(mesh->config);
+            mesh->config->wg_peer_status[i] = (rc == 0) ? 1 : 0;
+            junknas_config_unlock(mesh->config);
+            if (rc == 0) did_sync = 1;
         }
 
         uint64_t peers_updated_at = 0;
@@ -1011,6 +1127,8 @@ junknas_mesh_t *junknas_mesh_start(junknas_config_t *config) {
         free(mesh);
         return NULL;
     }
+
+    (void)mesh_refresh_public_endpoint(mesh, 1);
 
     mesh_log_verbose(config, "mesh: applying WireGuard configuration");
     (void)mesh_apply_wireguard(mesh);
