@@ -413,6 +413,21 @@ static int mesh_mount_points_contains(const junknas_config_t *config, const char
     return 0;
 }
 
+static int mesh_mount_points_equal(const junknas_config_t *config, cJSON *mounts) {
+    if (!config || !cJSON_IsArray(mounts)) return 0;
+
+    int n = cJSON_GetArraySize(mounts);
+    if (n != config->data_mount_point_count) return 0;
+
+    for (int i = 0; i < n; i++) {
+        cJSON *entry = cJSON_GetArrayItem(mounts, i);
+        if (!cJSON_IsString(entry) || !entry->valuestring) return 0;
+        if (strcmp(config->data_mount_points[i], entry->valuestring) != 0) return 0;
+    }
+
+    return 1;
+}
+
 static void mesh_ensure_local_mount(struct junknas_mesh *mesh) {
     if (!mesh || !mesh->config) return;
     junknas_config_lock(mesh->config);
@@ -566,19 +581,25 @@ static int mesh_update_from_json(struct junknas_mesh *mesh, const char *payload)
     if (cJSON_IsNumber(mounts_updated) && mounts_updated->valuedouble >= 0) {
         remote_mounts_updated = (uint64_t)mounts_updated->valuedouble;
     }
-    if (remote_mounts_updated > config->data_mount_points_updated_at) {
+    if (remote_mounts_updated >= config->data_mount_points_updated_at) {
         cJSON *mounts = cJSON_GetObjectItemCaseSensitive(root, "mount_points");
         if (cJSON_IsArray(mounts)) {
-            config->data_mount_point_count = 0;
-            int n = cJSON_GetArraySize(mounts);
-            for (int i = 0; i < n && config->data_mount_point_count < MAX_DATA_MOUNT_POINTS; i++) {
-                cJSON *entry = cJSON_GetArrayItem(mounts, i);
-                if (cJSON_IsString(entry) && entry->valuestring) {
-                    (void)junknas_config_add_data_mount_point(config, entry->valuestring);
+            int same = mesh_mount_points_equal(config, mounts);
+            if (!same) {
+                config->data_mount_point_count = 0;
+                int n = cJSON_GetArraySize(mounts);
+                for (int i = 0; i < n && config->data_mount_point_count < MAX_DATA_MOUNT_POINTS; i++) {
+                    cJSON *entry = cJSON_GetArrayItem(mounts, i);
+                    if (cJSON_IsString(entry) && entry->valuestring) {
+                        (void)junknas_config_add_data_mount_point(config, entry->valuestring);
+                    }
                 }
+                changed = 1;
             }
-            config->data_mount_points_updated_at = remote_mounts_updated;
-            changed = 1;
+            if (remote_mounts_updated > config->data_mount_points_updated_at) {
+                config->data_mount_points_updated_at = remote_mounts_updated;
+                changed = 1;
+            }
         }
     }
 
