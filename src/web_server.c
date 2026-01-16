@@ -1155,6 +1155,7 @@ static int respond_mesh_join(int fd, junknas_config_t *config, const char *paylo
 
     cJSON *allow_alt = cJSON_GetObjectItemCaseSensitive(root, "allow_alternate");
     int allow_alternate = cJSON_IsBool(allow_alt) ? cJSON_IsTrue(allow_alt) : 0;
+    int set_dead_end = !allow_alternate;
     const char *peer_endpoint = "";
     cJSON *peer_endpoint_json = cJSON_GetObjectItemCaseSensitive(root, "peer_endpoint");
     if (cJSON_IsString(peer_endpoint_json) && peer_endpoint_json->valuestring) {
@@ -1185,6 +1186,10 @@ static int respond_mesh_join(int fd, junknas_config_t *config, const char *paylo
     snprintf(config->wg.private_key, sizeof(config->wg.private_key), "%s", peer_private->valuestring);
     snprintf(config->wg.public_key, sizeof(config->wg.public_key), "%s", public_b64);
     snprintf(config->wg.wg_ip, sizeof(config->wg.wg_ip), "%s", peer_wg_ip->valuestring);
+    if (set_dead_end) {
+        snprintf(config->node_state, sizeof(config->node_state), "%s", NODE_STATE_END);
+        config->wg.endpoint[0] = '\0';
+    }
 
     junknas_wg_peer_t server_peer = {0};
     snprintf(server_peer.public_key, sizeof(server_peer.public_key), "%s", server_public->valuestring);
