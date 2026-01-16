@@ -12,36 +12,25 @@ The configuration file is JSON. The most common source of confusion is the
 * If `data_dirs` is provided as a **string**, it is ignored. Use a JSON array.
 * The maximum number of entries in `data_dirs` is 8.
 
-### Single directory
+The examples below are LAN-first and intentionally omit WireGuard configuration
+so that mesh sync uses plain HTTP on your local network.
+
+### LAN-only HTTP (single directory)
 
 ```json
 {
   "storage_size": "1G",
-  "data_dir": "/home/user/.local/share/junknas/data",
+  "data_dirs": [
+    "/home/user/.local/share/junknas/data"
+  ],
   "mount_point": "/mnt/junknas",
   "web_port": 9090,
   "verbose": true,
   "enable_fuse": true,
   "daemon_mode": false,
-  "wireguard": {
-    "interface_name": "jnk0",
-    "wg_ip": "10.99.0.42",
-    "endpoint": "example.com:51820",
-    "listen_port": 51820,
-    "mtu": 1420
-  },
   "bootstrap_peers": [
-    "10.0.0.1:8080",
-    "example.com:8080"
-  ],
-  "wg_peers": [
-    {
-      "public_key": "BASE64_PUBLIC_KEY_HERE",
-      "endpoint": "10.0.0.1:51820",
-      "wg_ip": "10.99.0.2",
-      "persistent_keepalive": 25,
-      "web_port": 8080
-    }
+    "192.168.1.10:9090",
+    "192.168.1.11:9090"
   ]
 }
 ```
@@ -65,25 +54,9 @@ on a specific disk.
   "verbose": true,
   "enable_fuse": true,
   "daemon_mode": false,
-  "wireguard": {
-    "interface_name": "jnk0",
-    "wg_ip": "10.99.0.42",
-    "endpoint": "example.com:51820",
-    "listen_port": 51820,
-    "mtu": 1420
-  },
   "bootstrap_peers": [
-    "10.0.0.1:8080",
-    "example.com:8080"
-  ],
-  "wg_peers": [
-    {
-      "public_key": "BASE64_PUBLIC_KEY_HERE",
-      "endpoint": "10.0.0.1:51820",
-      "wg_ip": "10.99.0.2",
-      "persistent_keepalive": 25,
-      "web_port": 8080
-    }
+    "192.168.1.10:9090",
+    "192.168.1.11:9090"
   ]
 }
 ```
@@ -92,6 +65,6 @@ on a specific disk.
 
 * Always use a JSON array for `data_dirs` (even if it has just one entry).
 * Ensure every directory exists and is writable by the junkNAS process.
-* `bootstrap_peers` should point at the web server endpoints used for mesh sync.
+* `bootstrap_peers` should point at LAN web server endpoints used for mesh sync.
 * Configuration and WireGuard keys live under `$XDG_CONFIG_HOME/junkNAS` (or
   `~/.config/junkNAS`) for persistence.
