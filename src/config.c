@@ -9,7 +9,7 @@
  * Expected JSON shape (example):
  * {
  *   "storage_size": "10G",
- *   "data_dir": "/home/user/.local/share/junknas/data",
+ *   "data_dir": "$HOME/.local/share/junknas/data",
  *   "mount_point": "/mnt/junknas",
  *   "web_port": 8080,
  *   "verbose": 1,
@@ -405,6 +405,29 @@ static int safe_strcpy(char *dst, size_t dst_len, const char *src) {
     memcpy(dst, src, n);
     dst[n] = '\0';
     return 0;
+}
+
+static int expand_home_path(const char *src, char *dst, size_t dst_len) {
+    if (!dst || dst_len == 0) return -1;
+    if (!src) {
+        dst[0] = '\0';
+        return 0;
+    }
+
+    const char *home = jn_get_home_dir();
+    if (!home || home[0] == '\0') {
+        return safe_strcpy(dst, dst_len, src);
+    }
+
+    if (strncmp(src, "$HOME/", 6) == 0) {
+        return snprintf(dst, dst_len, "%s/%s", home, src + 6) >= (int)dst_len ? -1 : 0;
+    }
+
+    if (src[0] == '~' && src[1] == '/') {
+        return snprintf(dst, dst_len, "%s/%s", home, src + 2) >= (int)dst_len ? -1 : 0;
+    }
+
+    return safe_strcpy(dst, dst_len, src);
 }
 
 /* Read entire file into a heap buffer.
@@ -1000,7 +1023,12 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
     /* data_dir */
     cJSON *data_dir = cJSON_GetObjectItemCaseSensitive(root, "data_dir");
     if (cJSON_IsString(data_dir) && data_dir->valuestring) {
-        (void)safe_strcpy(config->data_dir, sizeof(config->data_dir), data_dir->valuestring);
+        char expanded[MAX_PATH_LEN];
+        if (expand_home_path(data_dir->valuestring, expanded, sizeof(expanded)) == 0) {
+            (void)safe_strcpy(config->data_dir, sizeof(config->data_dir), expanded);
+        } else {
+            (void)safe_strcpy(config->data_dir, sizeof(config->data_dir), data_dir->valuestring);
+        }
         (void)safe_strcpy(config->data_dirs[0], sizeof(config->data_dirs[0]), config->data_dir);
         config->data_dir_count = 1;
     }
@@ -1015,9 +1043,16 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
         for (int i = 0; i < n; i++) {
             cJSON *dir = cJSON_GetArrayItem(data_dirs, i);
             if (cJSON_IsString(dir) && dir->valuestring) {
-                (void)safe_strcpy(config->data_dirs[config->data_dir_count],
-                                  sizeof(config->data_dirs[config->data_dir_count]),
-                                  dir->valuestring);
+                char expanded[MAX_PATH_LEN];
+                if (expand_home_path(dir->valuestring, expanded, sizeof(expanded)) == 0) {
+                    (void)safe_strcpy(config->data_dirs[config->data_dir_count],
+                                      sizeof(config->data_dirs[config->data_dir_count]),
+                                      expanded);
+                } else {
+                    (void)safe_strcpy(config->data_dirs[config->data_dir_count],
+                                      sizeof(config->data_dirs[config->data_dir_count]),
+                                      dir->valuestring);
+                }
                 config->data_dir_count++;
             }
         }
