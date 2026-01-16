@@ -17,7 +17,7 @@ The configuration file is JSON. The most common source of confusion is the
 ```json
 {
   "storage_size": "1G",
-  "data_dir": "/var/lib/junknas/data",
+  "data_dir": "/home/user/.local/share/junknas/data",
   "mount_point": "/mnt/junknas",
   "web_port": 9090,
   "verbose": true,
@@ -57,8 +57,8 @@ on a specific disk.
 {
   "storage_size": "1G",
   "data_dirs": [
-    "/var/lib/junknas/data",
-    "/var/lib/junknas/data-secondary"
+    "/home/user/.local/share/junknas/data",
+    "/home/user/.local/share/junknas/data-secondary"
   ],
   "mount_point": "/mnt/junknas",
   "web_port": 9090,
@@ -93,4 +93,5 @@ on a specific disk.
 * Always use a JSON array for `data_dirs` (even if it has just one entry).
 * Ensure every directory exists and is writable by the junkNAS process.
 * `bootstrap_peers` should point at the web server endpoints used for mesh sync.
-* Configuration and WireGuard keys live under `/etc/junkNAS` for persistence.
+* Configuration and WireGuard keys live under `$XDG_CONFIG_HOME/junkNAS` (or
+  `~/.config/junkNAS`) for persistence.
