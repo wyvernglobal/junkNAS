@@ -34,6 +34,7 @@
 #include "config.h"
 
 #include <errno.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -624,6 +625,25 @@ int junknas_config_set_wg_peers(junknas_config_t *config, const junknas_wg_peer_
     return 0;
 }
 
+static int g_startup_verbose = 0;
+
+void junknas_config_set_startup_verbose(int verbose) {
+    g_startup_verbose = verbose ? 1 : 0;
+}
+
+static int config_should_log_verbose(const junknas_config_t *config) {
+    return (config && config->verbose) || g_startup_verbose;
+}
+
+static void config_log_verbose(const junknas_config_t *config, const char *fmt, ...) {
+    if (!config_should_log_verbose(config)) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
+
 static void set_defaults(junknas_config_t *config) {
     /* This function sets the full config structure to known defaults. */
     memset(config, 0, sizeof(*config));
@@ -730,9 +750,11 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
 
     char private_key_path[MAX_PATH_LEN];
     if (build_private_key_path(config, private_key_path, sizeof(private_key_path)) != 0) {
+        config_log_verbose(config, "config: failed to build WireGuard key path");
         return -1;
     }
 
+    config_log_verbose(config, "config: ensuring WireGuard keys in %s", private_key_path);
     junknas_config_lock(config);
 
     jn_wg_key private_key;
@@ -752,7 +774,10 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
                 changed = true;
             }
             have_private = true;
+            config_log_verbose(config, "config: loaded existing WireGuard private key");
         }
+    } else {
+        config_log_verbose(config, "config: no private key file found at %s", private_key_path);
     }
     free(file_contents);
 
@@ -767,17 +792,20 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
             (void)safe_strcpy(config->wg.private_key, sizeof(config->wg.private_key), priv_b64);
             changed = true;
             have_private = true;
+            config_log_verbose(config, "config: generated new WireGuard private key");
         }
         should_write_private = true;
     }
 
     if (!have_private) {
         junknas_config_unlock(config);
+        config_log_verbose(config, "config: failed to obtain WireGuard private key");
         return -1;
     }
 
     if (jn_wg_key_from_base64(private_key, config->wg.private_key) != 0) {
         junknas_config_unlock(config);
+        config_log_verbose(config, "config: WireGuard private key is invalid");
         return -1;
     }
 
@@ -786,17 +814,21 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
     if (strcmp(config->wg.public_key, pub_b64) != 0) {
         (void)safe_strcpy(config->wg.public_key, sizeof(config->wg.public_key), pub_b64);
         changed = true;
+        config_log_verbose(config, "config: updated WireGuard public key");
     }
 
     junknas_config_unlock(config);
 
     if (should_write_private) {
         if (write_entire_file_atomic(private_key_path, config->wg.private_key) != 0) {
+            config_log_verbose(config, "config: failed to write private key to %s", private_key_path);
             return -1;
         }
+        config_log_verbose(config, "config: wrote WireGuard private key to %s", private_key_path);
     }
 
     if (changed) {
+        config_log_verbose(config, "config: saving updated WireGuard keys to %s", config->config_file_path);
         return junknas_config_save(config, config->config_file_path);
     }
 
@@ -808,6 +840,7 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
 
     char *json_text = NULL;
     if (read_entire_file(config_file, &json_text, NULL) != 0) {
+        config_log_verbose(config, "config: failed to read %s", config_file);
         return -1;
     }
 
@@ -816,6 +849,7 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
     json_text = NULL;
 
     if (!root) {
+        config_log_verbose(config, "config: failed to parse JSON in %s", config_file);
         return -1;
     }
 
@@ -1011,6 +1045,7 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
     }
 
     cJSON_Delete(root);
+    config_log_verbose(config, "config: loaded %s", config_file);
     return 0;
 }
 
@@ -1118,6 +1153,11 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
 
     int rc = write_entire_file_atomic(config_file, printed);
     free(printed);
+    if (rc != 0) {
+        config_log_verbose(config, "config: failed to write %s", config_file);
+    } else {
+        config_log_verbose(config, "config: wrote %s", config_file);
+    }
     return (rc == 0) ? 0 : -1;
 }
 
@@ -1126,24 +1166,34 @@ int junknas_config_init(junknas_config_t *config, const char *config_file) {
 
     /* Start with defaults */
     set_defaults(config);
+    config_log_verbose(config, "config: defaults loaded");
 
     /* If config_file provided, use it and also store the path */
     if (config_file && config_file[0] != '\0') {
         (void)safe_strcpy(config->config_file_path, sizeof(config->config_file_path), config_file);
+        config_log_verbose(config, "config: loading config file %s", config_file);
 
         /* Loading is optional: missing file should not necessarily be fatal
          * BUT: right now we treat load failure as an error to make debugging easy.
          * We can change later to "ignore ENOENT".
          */
         if (junknas_config_load(config, config_file) != 0) {
+            config_log_verbose(config, "config: failed to load %s", config_file);
             return -1;
         }
     }
 
+    config_log_verbose(config, "config: ensuring WireGuard keys");
     if (junknas_config_ensure_wg_keys(config) != 0) {
+        config_log_verbose(config, "config: WireGuard key setup failed");
         return -1;
     }
 
     /* Validate final config */
-    return junknas_config_validate(config);
+    if (junknas_config_validate(config) != 0) {
+        config_log_verbose(config, "config: validation failed");
+        return -1;
+    }
+    config_log_verbose(config, "config: validation succeeded");
+    return 0;
 }

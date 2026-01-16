@@ -37,6 +37,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -53,6 +54,15 @@
 
 /* Chunk store: <data_dir>/.jnk/chunks/sha256/ab/<hashhex> */
 #define STORE_SUBDIR  ".jnk/chunks/sha256"
+
+static void fuse_log_verbose(const junknas_config_t *cfg, const char *fmt, ...) {
+    if (!cfg || !cfg->verbose) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
 
 /* ----------------------------- SHA-256 ----------------------------------
  * Minimal SHA-256 implementation (public-domain style).
@@ -1374,6 +1384,8 @@ int junknas_fuse_run(const junknas_config_t *cfg,
                      char **argv) {
     if (!cfg) return -1;
 
+    fuse_log_verbose(cfg, "fuse: initializing with backing dir %s", cfg->data_dir);
+
     jnk_fuse_state_t *state = (jnk_fuse_state_t *)calloc(1, sizeof(*state));
     if (!state) return -1;
 
@@ -1391,19 +1403,33 @@ int junknas_fuse_run(const junknas_config_t *cfg,
     state->mesh = mesh;
 
     if (mkdir(state->backing_dir, 0755) != 0) {
-        if (errno != EEXIST) { free(state); return -1; }
+        if (errno != EEXIST) {
+            fuse_log_verbose(cfg, "fuse: failed to create backing dir %s: %s",
+                             state->backing_dir, strerror(errno));
+            free(state);
+            return -1;
+        }
     }
+    fuse_log_verbose(cfg, "fuse: backing dir ready at %s", state->backing_dir);
 
     for (size_t i = 0; i < state->store_dir_count; i++) {
         if (mkdir(state->store_dirs[i], 0755) != 0) {
-            if (errno != EEXIST) { free(state); return -1; }
+            if (errno != EEXIST) {
+                fuse_log_verbose(cfg, "fuse: failed to create store dir %s: %s",
+                                 state->store_dirs[i], strerror(errno));
+                free(state);
+                return -1;
+            }
         }
+        fuse_log_verbose(cfg, "fuse: store dir ready at %s", state->store_dirs[i]);
     }
 
     if (ensure_store_layout(state) != 0) {
+        fuse_log_verbose(cfg, "fuse: failed to ensure store layout");
         free(state);
         return -1;
     }
+    fuse_log_verbose(cfg, "fuse: store layout ensured");
 
     /* Correct FUSE3 args: build from scratch */
     struct fuse_args args = FUSE_ARGS_INIT(0, NULL);
@@ -1417,6 +1443,7 @@ int junknas_fuse_run(const junknas_config_t *cfg,
     /* Mountpoint from config */
     if (fuse_opt_add_arg(&args, cfg->mount_point) != 0) { fuse_opt_free_args(&args); free(state); return -1; }
 
+    fuse_log_verbose(cfg, "fuse: entering fuse_main");
     int rc = fuse_main(args.argc, args.argv, &jnk_ops, state);
 
     fuse_opt_free_args(&args);
