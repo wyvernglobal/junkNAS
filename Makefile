@@ -52,7 +52,7 @@ BIN_TEST_WG := $(BIN_DIR)/test_wireguard
 all: $(BIN_JUNKNAS) $(BIN_TEST_CONFIG) $(BIN_TEST_WG)
 
 init: all
-	@mkdir -p /etc/junkNAS /var/lib/junknas/data /mnt/junknas
+	@mkdir -p $(HOME)/.config/junkNAS $(HOME)/.local/share/junknas/data /mnt/junknas
 	@echo "Initialized build artifacts and local test directories."
 
 $(BIN_JUNKNAS): $(JUNKNAS_OBJS) | $(BIN_DIR)

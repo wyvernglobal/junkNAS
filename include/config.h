@@ -16,9 +16,9 @@
  * These are the fallback values if no config file exists or values are missing
  */
 
-#define DEFAULT_DATA_DIR        "/var/lib/junknas/data"
-#define DEFAULT_CONFIG_DIR      "/etc/junkNAS"
-#define DEFAULT_CONFIG_FILE     "/etc/junkNAS/config.json"
+#define DEFAULT_CONFIG_DIR_NAME "junkNAS"
+#define DEFAULT_DATA_DIR_NAME   "junknas"
+#define DEFAULT_CONFIG_FILE_NAME "config.json"
 #define DEFAULT_MOUNT_POINT     "/mnt/junknas"
 #define DEFAULT_WEB_PORT        8080
 #define DEFAULT_WG_PORT         51820
@@ -198,6 +198,16 @@ int junknas_config_add_data_mount_point(junknas_config_t *config, const char *mo
  * Returns 1 if changed, 0 if no change, -1 on error.
  */
 int junknas_config_upsert_wg_peer(junknas_config_t *config, const junknas_wg_peer_t *peer);
+
+/*
+ * Resolve default config/data paths in user space using XDG or HOME.
+ * @param out           Output buffer for the resolved path.
+ * @param out_len       Output buffer size.
+ * @return              0 on success, -1 on error.
+ */
+int junknas_default_config_dir(char *out, size_t out_len);
+int junknas_default_data_dir(char *out, size_t out_len);
+int junknas_default_config_file(char *out, size_t out_len);
 
 /*
  * Replace the WireGuard peers list with provided peers.
