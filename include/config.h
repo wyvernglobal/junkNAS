@@ -149,6 +149,13 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
 int junknas_config_validate(const junknas_config_t *config);
 
 /*
+ * Ensure WireGuard keys exist by loading from private.key or generating them.
+ * Updates config->wg.public_key and writes private key to private.key when needed.
+ * Returns 0 on success, -1 on failure.
+ */
+int junknas_config_ensure_wg_keys(junknas_config_t *config);
+
+/*
  * Clean up any dynamically allocated resources in config
  * (Currently config uses static buffers, but good practice for future)
  * @param config        Pointer to config to clean up
