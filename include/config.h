@@ -17,7 +17,8 @@
  */
 
 #define DEFAULT_DATA_DIR        "/var/lib/junknas/data"
-#define DEFAULT_CONFIG_FILE     "/etc/junknas/config.json"
+#define DEFAULT_CONFIG_DIR      "/etc/junkNAS"
+#define DEFAULT_CONFIG_FILE     "/etc/junkNAS/config.json"
 #define DEFAULT_MOUNT_POINT     "/mnt/junknas"
 #define DEFAULT_WEB_PORT        8080
 #define DEFAULT_WG_PORT         51820
