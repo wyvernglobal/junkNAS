@@ -165,7 +165,11 @@ static int normalize_key_string(const char *input, char *out, size_t out_len) {
 }
 
 static int ensure_config_dir(void) {
-    if (mkdir(DEFAULT_CONFIG_DIR, 0755) != 0 && errno != EEXIST) {
+    char config_dir[MAX_PATH_LEN];
+    if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+        return -1;
+    }
+    if (mkdir(config_dir, 0755) != 0 && errno != EEXIST) {
         return -1;
     }
     return 0;
@@ -173,19 +177,23 @@ static int ensure_config_dir(void) {
 
 static int build_private_key_path(const junknas_config_t *config, char *out, size_t out_len) {
     if (!config || !out || out_len == 0) return -1;
+    char config_dir[MAX_PATH_LEN];
+    if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+        return -1;
+    }
 
     if (config->config_file_path[0] == '\0') {
-        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
+        return snprintf(out, out_len, "%s/private.key", config_dir) >= (int)out_len ? -1 : 0;
     }
 
     const char *slash = strrchr(config->config_file_path, '/');
     if (!slash) {
-        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
+        return snprintf(out, out_len, "%s/private.key", config_dir) >= (int)out_len ? -1 : 0;
     }
 
     size_t dir_len = (size_t)(slash - config->config_file_path);
     if (dir_len == 0) {
-        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
+        return snprintf(out, out_len, "%s/private.key", config_dir) >= (int)out_len ? -1 : 0;
     }
 
     return snprintf(out, out_len, "%.*s/private.key", (int)dir_len, config->config_file_path) >= (int)out_len
@@ -888,7 +896,12 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
 
     if (should_write_private) {
         if (ensure_config_dir() != 0) {
-            mesh_log_verbose(mesh->config, "mesh: failed to ensure config dir %s", DEFAULT_CONFIG_DIR);
+            char config_dir[MAX_PATH_LEN];
+            if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+                mesh_log_verbose(mesh->config, "mesh: failed to ensure config dir (unable to resolve path)");
+            } else {
+                mesh_log_verbose(mesh->config, "mesh: failed to ensure config dir %s", config_dir);
+            }
             return -1;
         }
         if (write_entire_file_atomic(private_key_path, mesh->config->wg.private_key) != 0) {

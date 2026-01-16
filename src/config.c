@@ -9,7 +9,7 @@
  * Expected JSON shape (example):
  * {
  *   "storage_size": "10G",
- *   "data_dir": "/var/lib/junknas/data",
+ *   "data_dir": "/home/user/.local/share/junknas/data",
  *   "mount_point": "/mnt/junknas",
  *   "web_port": 8080,
  *   "verbose": 1,
@@ -44,8 +44,10 @@
 #include <string.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <pwd.h>
 #include <cjson/cJSON.h>
 
 /* ------------------------------ Helpers ---------------------------------- */
@@ -68,6 +70,66 @@ static void jn_wg_encode_base64(char dest[static 4], const uint8_t src[static 3]
                   - (((61 - input[i]) >> 8) & 15)
                   + (((62 - input[i]) >> 8) & 3);
     }
+}
+
+static const char *jn_get_home_dir(void) {
+    const char *home = getenv("HOME");
+
+    if (home && home[0] != '\0') {
+        return home;
+    }
+
+    struct passwd *pw = getpwuid(getuid());
+    if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
+        return pw->pw_dir;
+    }
+
+    return NULL;
+}
+
+int junknas_default_config_dir(char *out, size_t out_len) {
+    if (!out || out_len == 0) return -1;
+
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && xdg[0] != '\0') {
+        return snprintf(out, out_len, "%s/%s", xdg, DEFAULT_CONFIG_DIR_NAME) >= (int)out_len ? -1 : 0;
+    }
+
+    const char *home = jn_get_home_dir();
+    if (home && home[0] != '\0') {
+        return snprintf(out, out_len, "%s/.config/%s", home, DEFAULT_CONFIG_DIR_NAME) >= (int)out_len ? -1 : 0;
+    }
+
+    return snprintf(out, out_len, "/tmp/%s", DEFAULT_CONFIG_DIR_NAME) >= (int)out_len ? -1 : 0;
+}
+
+int junknas_default_data_dir(char *out, size_t out_len) {
+    if (!out || out_len == 0) return -1;
+
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && xdg[0] != '\0') {
+        return snprintf(out, out_len, "%s/%s/data", xdg, DEFAULT_DATA_DIR_NAME) >= (int)out_len ? -1 : 0;
+    }
+
+    const char *home = jn_get_home_dir();
+    if (home && home[0] != '\0') {
+        return snprintf(out, out_len, "%s/.local/share/%s/data", home, DEFAULT_DATA_DIR_NAME) >= (int)out_len
+                   ? -1
+                   : 0;
+    }
+
+    return snprintf(out, out_len, "/tmp/%s/data", DEFAULT_DATA_DIR_NAME) >= (int)out_len ? -1 : 0;
+}
+
+int junknas_default_config_file(char *out, size_t out_len) {
+    if (!out || out_len == 0) return -1;
+
+    char config_dir[MAX_PATH_LEN];
+    if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+        return -1;
+    }
+
+    return snprintf(out, out_len, "%s/%s", config_dir, DEFAULT_CONFIG_FILE_NAME) >= (int)out_len ? -1 : 0;
 }
 
 static void jn_wg_key_to_base64(jn_wg_key_b64_string base64, const jn_wg_key key) {
@@ -452,7 +514,11 @@ static int normalize_key_string(const char *input, char *out, size_t out_len) {
 }
 
 static int ensure_config_dir(void) {
-    if (mkdir(DEFAULT_CONFIG_DIR, 0755) != 0 && errno != EEXIST) {
+    char config_dir[MAX_PATH_LEN];
+    if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+        return -1;
+    }
+    if (mkdir(config_dir, 0755) != 0 && errno != EEXIST) {
         return -1;
     }
     return 0;
@@ -460,32 +526,40 @@ static int ensure_config_dir(void) {
 
 static int build_config_file_path(const char *config_file, char *out, size_t out_len) {
     if (!out || out_len == 0) return -1;
+    char config_dir[MAX_PATH_LEN];
+    if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+        return -1;
+    }
     const char *base = NULL;
     if (config_file) {
         const char *slash = strrchr(config_file, '/');
         base = slash ? slash + 1 : config_file;
     }
     if (!base || base[0] == '\0') {
-        base = "config.json";
+        base = DEFAULT_CONFIG_FILE_NAME;
     }
-    return snprintf(out, out_len, "%s/%s", DEFAULT_CONFIG_DIR, base) >= (int)out_len ? -1 : 0;
+    return snprintf(out, out_len, "%s/%s", config_dir, base) >= (int)out_len ? -1 : 0;
 }
 
 static int build_private_key_path(const junknas_config_t *config, char *out, size_t out_len) {
     if (!config || !out || out_len == 0) return -1;
+    char config_dir[MAX_PATH_LEN];
+    if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+        return -1;
+    }
 
     if (config->config_file_path[0] == '\0') {
-        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
+        return snprintf(out, out_len, "%s/private.key", config_dir) >= (int)out_len ? -1 : 0;
     }
 
     const char *slash = strrchr(config->config_file_path, '/');
     if (!slash) {
-        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
+        return snprintf(out, out_len, "%s/private.key", config_dir) >= (int)out_len ? -1 : 0;
     }
 
     size_t dir_len = (size_t)(slash - config->config_file_path);
     if (dir_len == 0) {
-        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
+        return snprintf(out, out_len, "%s/private.key", config_dir) >= (int)out_len ? -1 : 0;
     }
 
     return snprintf(out, out_len, "%.*s/private.key", (int)dir_len, config->config_file_path) >= (int)out_len
@@ -679,11 +753,11 @@ static void set_defaults(junknas_config_t *config) {
     config->max_storage_bytes = junknas_parse_storage_size(DEFAULT_STORAGE_SIZE);
 
     /* Paths */
-    (void)safe_strcpy(config->data_dir, sizeof(config->data_dir), DEFAULT_DATA_DIR);
-    (void)safe_strcpy(config->data_dirs[0], sizeof(config->data_dirs[0]), DEFAULT_DATA_DIR);
+    (void)junknas_default_data_dir(config->data_dir, sizeof(config->data_dir));
+    (void)junknas_default_data_dir(config->data_dirs[0], sizeof(config->data_dirs[0]));
     config->data_dir_count = 1;
     (void)safe_strcpy(config->mount_point, sizeof(config->mount_point), DEFAULT_MOUNT_POINT);
-    (void)safe_strcpy(config->config_file_path, sizeof(config->config_file_path), DEFAULT_CONFIG_FILE);
+    (void)junknas_default_config_file(config->config_file_path, sizeof(config->config_file_path));
 
     /* Web */
     config->web_port = (uint16_t)DEFAULT_WEB_PORT;
@@ -858,7 +932,12 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
 
     if (should_write_private) {
         if (ensure_config_dir() != 0) {
-            config_log_verbose(config, "config: failed to ensure config dir %s", DEFAULT_CONFIG_DIR);
+            char config_dir[MAX_PATH_LEN];
+            if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
+                config_log_verbose(config, "config: failed to ensure config dir (unable to resolve path)");
+            } else {
+                config_log_verbose(config, "config: failed to ensure config dir %s", config_dir);
+            }
             return -1;
         }
         if (write_entire_file_atomic(private_key_path, config->wg.private_key) != 0) {
