@@ -1,7 +1,7 @@
 {
 	"storage_size":	"1G",
-	"data_dir":	"/home/user/.local/share/junknas/data",
-	"data_dirs":	["/home/user/.local/share/junknas/data"],
+	"data_dir":	"$HOME/.local/share/junknas/data",
+	"data_dirs":	["$HOME/.local/share/junknas/data"],
 	"mount_point":	"/mnt/junknas",
 	"web_port":	9090,
 	"node_state":	"node",

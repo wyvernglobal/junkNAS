@@ -352,6 +352,14 @@ static int ensure_dir(const char *p) {
     return 0;
 }
 
+static int ensure_dir_recursive(const char *p) {
+    if (ensure_parent_dirs(p) != 0) return -1;
+    if (mkdir(p, 0755) != 0) {
+        if (errno != EEXIST) return -1;
+    }
+    return 0;
+}
+
 static int ensure_store_layout_dir(const char *base_dir) {
   /* Create <base>/.jnk, <base>/.jnk/chunks/sha256 */
   char p1[MAX_PATH_LEN], p2[MAX_PATH_LEN], p3[MAX_PATH_LEN];
@@ -1402,24 +1410,20 @@ int junknas_fuse_run(const junknas_config_t *cfg,
     state->quota_bytes = cfg->max_storage_bytes; /* 0 = unlimited */
     state->mesh = mesh;
 
-    if (mkdir(state->backing_dir, 0755) != 0) {
-        if (errno != EEXIST) {
-            fuse_log_verbose(cfg, "fuse: failed to create backing dir %s: %s",
-                             state->backing_dir, strerror(errno));
-            free(state);
-            return -1;
-        }
+    if (ensure_dir_recursive(state->backing_dir) != 0) {
+        fuse_log_verbose(cfg, "fuse: failed to create backing dir %s: %s",
+                         state->backing_dir, strerror(errno));
+        free(state);
+        return -1;
     }
     fuse_log_verbose(cfg, "fuse: backing dir ready at %s", state->backing_dir);
 
     for (size_t i = 0; i < state->store_dir_count; i++) {
-        if (mkdir(state->store_dirs[i], 0755) != 0) {
-            if (errno != EEXIST) {
-                fuse_log_verbose(cfg, "fuse: failed to create store dir %s: %s",
-                                 state->store_dirs[i], strerror(errno));
-                free(state);
-                return -1;
-            }
+        if (ensure_dir_recursive(state->store_dirs[i]) != 0) {
+            fuse_log_verbose(cfg, "fuse: failed to create store dir %s: %s",
+                             state->store_dirs[i], strerror(errno));
+            free(state);
+            return -1;
         }
         fuse_log_verbose(cfg, "fuse: store dir ready at %s", state->store_dirs[i]);
     }
