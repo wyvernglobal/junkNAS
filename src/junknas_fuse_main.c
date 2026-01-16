@@ -216,9 +216,10 @@ static int handle_bootstrap_peers_command(junknas_config_t *cfg,
         return 2;
     }
 
+    const char *save_path = (cfg->config_file_path[0] != '\0') ? cfg->config_file_path : config_path;
     cfg->bootstrap_peers_updated_at = (uint64_t)time(NULL);
-    if (junknas_config_save(cfg, config_path) != 0) {
-        fprintf(stderr, "Failed to save config to %s\n", config_path);
+    if (junknas_config_save(cfg, save_path) != 0) {
+        fprintf(stderr, "Failed to save config to %s\n", save_path);
         return 1;
     }
     return 0;
