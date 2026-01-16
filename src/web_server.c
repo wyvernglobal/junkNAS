@@ -607,10 +607,14 @@ static void respond_mesh_ui(int fd) {
              "#mesh-qr{border:1px solid #ddd;border-radius:6px;background:#fff;}"
              ".checkbox{display:flex;align-items:center;gap:8px;margin-top:8px;}"
              ".actions{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;}"
+             ".muted{color:#666;font-size:12px;}"
              ".badge{display:inline-block;padding:2px 6px;border-radius:4px;background:#eee;font-size:12px;}"
              ".badge.connected{background:#e6f7ec;color:#126b2d;}"
              ".badge.connecting{background:#fff4e5;color:#8a3b00;}"
              ".badge.unreachable{background:#ffe8e8;color:#a60000;}"
+             ".remove-peer{background:#ffe8e8;border:1px solid #f5b5b5;border-radius:4px;color:#a60000;"
+             "padding:4px 8px;cursor:pointer;}"
+             ".remove-peer:hover{background:#ffd6d6;}"
              "</style>");
     send_all(fd, "<h1>junkNAS mesh settings</h1>");
     send_all(fd, "<div id=\"mesh-role\" class=\"status\">Checking mesh status…</div>");
@@ -622,8 +626,10 @@ static void respond_mesh_ui(int fd) {
                   "</select>"
                   "</label>"
                   "<div id=\"self-info\">Loading…</div></section>");
-    send_all(fd, "<section><h2>Sync new mesh</h2>"
+    send_all(fd, "<section id=\"sync-section\"><h2>Sync new mesh</h2>"
                   "<p>Generate a join config for a new peer and share it securely.</p>"
+                  "<p id=\"sync-disabled\" class=\"muted\" style=\"display:none;\">"
+                  "Sync config generation is disabled while this node is set to end.</p>"
                   "<div class=\"actions\">"
                   "<button id=\"sync-new\">Sync new mesh</button>"
                   "<button id=\"copy-join\" type=\"button\">Copy join config</button>"
@@ -632,10 +638,6 @@ static void respond_mesh_ui(int fd) {
                   "<canvas id=\"mesh-qr\" width=\"180\" height=\"180\"></canvas>"
                   "<textarea id=\"join-config\" rows=\"7\" readonly></textarea>"
                   "</div></section>");
-    send_all(fd, "<section><h2>LAN peers</h2>"
-                  "<p>One endpoint per line (host:port).</p>"
-                  "<textarea id=\"bootstrap-peers\" rows=\"5\"></textarea>"
-                  "<div id=\"bootstrap-status\"></div></section>");
     send_all(fd, "<section><h2>Join mesh</h2>"
                   "<p>Paste a join config from another node to connect to its WireGuard interface.</p>"
                   "<textarea id=\"join-input\" rows=\"7\"></textarea>"
@@ -647,7 +649,7 @@ static void respond_mesh_ui(int fd) {
                   "<table id=\"wg-peers\">"
                   "<thead><tr>"
                   "<th>Public key</th><th>Endpoint</th>"
-                  "<th>WG IP</th><th>Keepalive</th><th>Web port</th><th>Status</th>"
+                  "<th>WG IP</th><th>Keepalive</th><th>Web port</th><th>Status</th><th>Actions</th>"
                   "</tr></thead><tbody></tbody></table></section>");
     send_all(fd, "<div class=\"actions\">"
                   "<button id=\"save-config\">Save changes</button>"
@@ -657,7 +659,7 @@ static void respond_mesh_ui(int fd) {
              "<script>"
              "const qrcodegen=function(){function e(e,t){this.modules=null,this.moduleCount=0,this.errorCorrectLevel=e,this.typeNumber=t}function t(e){this.mode=a.MODE_8BIT_BYTE,this.data=e,this.parsed=[];for(let t=0;t<e.length;t++){const r=e.charCodeAt(t);r<128?this.parsed.push(r):r<2048?(this.parsed.push(192|r>>6),this.parsed.push(128|63&r)):r<65536?(this.parsed.push(224|r>>12),this.parsed.push(128|r>>6&63),this.parsed.push(128|63&r)):(this.parsed.push(240|r>>18),this.parsed.push(128|r>>12&63),this.parsed.push(128|r>>6&63),this.parsed.push(128|63&r))}}const r={};r.QrCode=e,r.QrSegment=t;const a={};a.PAD0=236,a.PAD1=17,a.Ecc={LOW:1,MEDIUM:0,QUARTILE:3,HIGH:2},a.MODE_8BIT_BYTE=4,a.getBCHTypeInfo=function(e){let t=e<<10;for(;a.getBCHDigit(t)-a.getBCHDigit(1335)>=0;)t^=1335<<a.getBCHDigit(t)-a.getBCHDigit(1335);return(e<<10|t)^21522},a.getBCHTypeNumber=function(e){let t=e<<12;for(;a.getBCHDigit(t)-a.getBCHDigit(7973)>=0;)t^=7973<<a.getBCHDigit(t)-a.getBCHDigit(7973);return e<<12|t},a.getBCHDigit=function(e){let t=0;for(;e!=0;)t++,e>>=1;return t},a.getPatternPosition=function(e){return a.PATTERN_POSITION_TABLE[e-1]},a.getMask=function(e,t,r){switch(e){case 0:return(t+r)%2==0;case 1:return t%2==0;case 2:return r%3==0;case 3:return(t+r)%3==0;case 4:return(Math.floor(t/2)+Math.floor(r/3))%2==0;case 5:return t*r%2+t*r%3==0;case 6:return(t*r%2+t*r%3)%2==0;case 7:return(t*r%3+(t+r)%2)%2==0;default:throw new Error('bad maskPattern:'+e)}},a.getErrorCorrectPolynomial=function(e){let t=new i([1],0);for(let r=0;r<e;r++)t=t.multiply(new i([1,a.gexp(r)],0));return t},a.getLengthInBits=function(e,t){if(1<=t&&t<10)return 8;else if(t<27)return 16;else if(t<41)return 16;throw new Error('type:'+t)},a.getLostPoint=function(e){const t=e.moduleCount;let r=0;for(let a=0;a<t;a++)for(let i=0;i<t;i++){let n=0;const o=e.isDark(a,i);for(let e=-1;e<=1;e++)if(!(a+e<0||t<=a+e))for(let t=-1;t<=1;t++)if(!(i+t<0||t<=i+t)&&!(0==e&&0==t)&&o==e.isDark(a+e,i+t))n++;n>5&&(r+=3+n-5)}for(let a=0;a<t-1;a++)for(let i=0;i<t-1;i++){let n=0;e.isDark(a,i)&&n++,e.isDark(a+1,i)&&n++,e.isDark(a,i+1)&&n++,e.isDark(a+1,i+1)&&n++;(0==n||4==n)&&(r+=3)}for(let a=0;a<t;a++)for(let i=0;i<t-6;i++)e.isDark(a,i)&&!e.isDark(a,i+1)&&e.isDark(a,i+2)&&e.isDark(a,i+3)&&e.isDark(a,i+4)&&!e.isDark(a,i+5)&&e.isDark(a,i+6)&&(r+=40);for(let a=0;a<t;a++)for(let i=0;i<t-6;i++)e.isDark(i,a)&&!e.isDark(i+1,a)&&e.isDark(i+2,a)&&e.isDark(i+3,a)&&e.isDark(i+4,a)&&!e.isDark(i+5,a)&&e.isDark(i+6,a)&&(r+=40);let a=0;for(let r=0;r<t;r++)for(let i=0;i<t;i++)e.isDark(r,i)&&a++;return r+=10*Math.abs(100*a/t/t-50)/5},a.getRSBlocks=function(e,t){const r=a.RS_BLOCK_TABLE[4*(e-1)+t];if(void 0==r)throw new Error('bad rs block @ typeNumber:'+e+'/errorCorrectLevel:'+t);const i=r.length/3,n=[];for(let o=0;o<i;o++)for(let i=r[3*o+0],s=r[3*o+1],l=r[3*o+2],u=0;u<i;u++)n.push(new s(s,l));return n};const i=function(e,t){if(void 0==e.length)throw new Error(e.length+'/'+t);for(let t=0;t<e.length&&0==e[t];)t++;this.num=new Array(e.length-t+t);for(let r=0;r<e.length-t;r++)this.num[r]=e[r+t];this.shift=t};i.prototype={get:function(e){return this.num[e]},getLength:function(){return this.num.length},multiply:function(e){const t=new Array(this.getLength()+e.getLength()-1);for(let e=0;e<t.length;e++)t[e]=0;for(let r=0;r<this.getLength();r++)for(let a=0;a<e.getLength();a++)t[r+a]^=a.gexp(a.glog(this.get(r))+a.glog(e.get(a)));return new i(t,0)},mod:function(e){if(this.getLength()-e.getLength()<0)return this;const t=a.glog(this.get(0))-a.glog(e.get(0)),r=new Array(this.getLength());for(let e=0;e<this.getLength();e++)r[e]=this.get(e);for(let r=0;r<e.getLength();r++)r[r]^=a.gexp(a.glog(e.get(r))+t);return new i(r,0).mod(e)}};a.glog=function(e){if(e<1)throw new Error('glog('+e+')');return a.LOG_TABLE[e]};a.gexp=function(e){for(;e<0;)e+=255;for(;e>=256;)e-=255;return a.EXP_TABLE[e]};a.EXP_TABLE=new Array(256);a.LOG_TABLE=new Array(256);for(let e=0;e<8;e++)a.EXP_TABLE[e]=1<<e;for(let e=8;e<256;e++)a.EXP_TABLE[e]=a.EXP_TABLE[e-4]^a.EXP_TABLE[e-5]^a.EXP_TABLE[e-6]^a.EXP_TABLE[e-8];for(let e=0;e<255;e++)a.LOG_TABLE[a.EXP_TABLE[e]]=e;a.RS_BLOCK_TABLE=[1,26,19,1,26,16,1,26,13,1,26,9,1,44,34,1,44,28,1,44,22,1,44,16,1,70,55,1,70,44,2,35,17,2,35,13,1,100,80,2,50,32,2,50,24,4,25,9,1,134,108,2,67,43,2,33,15,2,33,11,2,86,68,4,43,27,4,43,19,4,43,15,2,98,78,4,49,31,2,32,14,4,39,13,4,121,97,2,60,38,4,40,18,2,30,14,4,40,18,4,36,16,2,146,116,4,58,36,4,36,16,4,46,20,4,40,18,2,86,68,4,69,43,6,43,19,2,44,18,2,100,80,4,50,32,6,50,24,4,25,9,2,134,108,4,67,43,6,33,15,2,33,11,4,146,116,6,58,36,2,36,16,4,46,20,6,40,18,4,50,32,4,50,24,2,25,9,4,121,97,4,60,38,6,40,18,2,30,14,2,146,116,6,58,36,4,36,16,6,46,20,4,40,18,4,61,47,4,47,27,6,38,22,2,29,14,4,58,40,2,47,26,4,37,22,4,29,14,4,147,116,6,58,36,2,36,16,7,46,20,6,40,18,4,77,59,8,47,27,8,38,22,4,29,14,5,65,52,10,39,24,8,37,22,8,29,14,6,139,106,6,69,43,4,43,19,4,33,11,7,79,61,6,47,27,8,38,22,2,31,14,5,73,55,6,46,20,10,39,24,4,37,22,8,29,14,13,145,112,8,58,36,4,36,16,11,46,20,6,40,18,5,56,44,10,47,27,10,38,22,4,29,14,12,92,68,12,58,36,4,36,16,11,46,20,4,40,18,7,42,32,14,47,27,14,38,22,6,29,14,4,133,104,16,58,36,2,36,16,11,46,20,4,40,18,9,74,56,16,47,27,16,38,22,4,29,14,2,131,104,8,59,37,6,37,16,11,46,20,6,40,18,2,93,69,17,47,27,22,45,20,13,28,10,4,107,81,4,65,40,14,39,18,16,49,24,4,36,16,2,116,92,6,58,36,14,37,16,16,46,20,6,40,18,4,121,97,14,47,27,16,38,22,4,29,14,6,114,88,12,60,37,6,41,17,10,46,20,6,40,18,7,122,98,14,48,27,11,39,22,7,30,14,4,117,91,10,61,37,16,38,17,16,46,20,6,40,18,7,126,100,12,47,27,16,38,22,4,29,14,6,100,80,10,54,27,14,41,18,2,32,14,9,143,108,14,61,37,10,39,18,12,46,20,6,40,18,7,110,84,12,48,27,18,44,20,8,31,14,5,127,98,14,62,37,10,40,18,16,46,20,6,40,18,8,139,105,14,47,27,22,45,20,8,30,14,8,107,81,12,51,27,12,41,18,12,45,20,2,32,14,10,97,74,14,48,27,18,45,20,8,31,14,3,120,90,14,52,27,20,38,18,10,46,20,6,40,18,7,142,107,10,53,27,18,43,20,10,31,14,4,88,67,20,51,27,20,41,18,4,47,20,6,40,18,2,116,86,10,46,27,28,45,20,14,31,14,4,82,62,14,48,27,28,44,20,2,32,14,4,137,104,14,53,27,18,42,20,4,33,14,13,115,87,8,40,27,12,31,20,8,41,14,4,80,58,14,50,27,20,47,20,4,32,14,5,118,89,16,55,27,20,45,20,8,33,14,5,80,60,12,46,27,24,42,20,8,32,14,11,115,87,12,45,27,22,40,20,4,33,14,5,102,78,12,48,27,28,44,20,4,31,14,8,132,96,14,54,27,32,43,20,4,32,14,5,94,70,20,51,27,28,45,20,4,31,14,10,117,87,14,45,27,24,42,20,10,32,14,10,88,64,14,50,27,24,39,20,8,32,14,4,130,98,18,54,27,16,43,20,4,32,14,14,115,85,16,46,27,24,41,20,6,32,14,5,94,70,26,50,27,16,40,20,6,32,14,8,126,96,18,53,27,16,43,20,10,32,14,10,91,67,26,50,27,18,40,20,8,32,14,8,127,96,22,53,27,22,43,20,12,32,14,5,100,75,24,49,27,30,40,20,8,32,14,11,112,84,24,51,27,18,42,20,4,32,14,5,103,77,28,49,27,28,40,20,12,32,14,5,117,87,26,52,27,22,42,20,4,32,14,11,112,84,26,50,27,30,41,20,8,32,14,4,119,89,26,49,27,24,41,20,8,32,14,6,106,80,24,51,27,28,42,20,12,32,14,4,113,85,28,53,27,22,43,20,4,32,14,5,129,96,28,52,27,32,42,20,8,32,14,4,120,90,28,50,27,24,42,20,8,32,14,12,119,87,28,54,27,24,43,20,8,32,14,4,113,85,30,53,27,24,43,20,12,32,14,7,110,86,28,54,27,32,43,20,12,32,14,12,119,87,28,50,27,24,43,20,12,32,14];a.PATTERN_POSITION_TABLE=[[],[6,18],[6,22],[6,26],[6,30],[6,34],[6,22,38],[6,24,42],[6,26,46],[6,28,50],[6,30,54],[6,32,58],[6,34,62],[6,26,46,66],[6,26,48,70],[6,26,50,74],[6,30,54,78],[6,30,56,82],[6,30,58,86],[6,34,62,90],[6,28,50,72,94],[6,26,50,74,98],[6,30,54,78,102],[6,28,54,80,106],[6,32,58,84,110],[6,30,58,86,114],[6,34,62,90,118],[6,26,50,74,98,122],[6,30,54,78,102,126],[6,26,52,78,104,130],[6,30,56,82,108,134],[6,34,60,86,112,138],[6,30,58,86,114,142],[6,34,62,90,118,146],[6,30,54,78,102,126,150],[6,24,50,76,102,128,154],[6,28,54,80,106,132,158],[6,32,58,84,110,136,162],[6,26,54,82,110,138,166],[6,30,58,86,114,142,170]];e.prototype={addData:function(e){this.dataList||(this.dataList=[]);this.dataList.push(new t(e))},isDark:function(e,t){if(e<0||this.moduleCount<=e||t<0||this.moduleCount<=t)throw new Error(e+','+t);return this.modules[e][t]},getModuleCount:function(){return this.moduleCount},make:function(){if(this.typeNumber<1){let e=1;for(;e<40;e++){const t=a.getRSBlocks(e,this.errorCorrectLevel),r=new n;let i=0;for(let e=0;e<t.length;e++)i+=t[e].dataCount;for(let e=0;e<this.dataList.length;e++){const t=this.dataList[e];r.put(t.mode,4),r.put(t.parsed.length,a.getLengthInBits(t.mode,e)),t.write(r)}if(r.getLengthInBits()<=8*i)break}this.typeNumber=e}this.makeImpl(!1,this.getBestMaskPattern())},makeImpl:function(e,t){this.moduleCount=4*this.typeNumber+17,this.modules=new Array(this.moduleCount);for(let e=0;e<this.moduleCount;e++){this.modules[e]=new Array(this.moduleCount);for(let t=0;t<this.moduleCount;t++)this.modules[e][t]=null}this.setupPositionProbePattern(0,0),this.setupPositionProbePattern(this.moduleCount-7,0),this.setupPositionProbePattern(0,this.moduleCount-7),this.setupPositionAdjustPattern(),this.setupTimingPattern(),this.setupTypeInfo(e,t),this.typeNumber>=7&&this.setupTypeNumber(e);const r=this.createData(this.typeNumber,this.errorCorrectLevel);this.mapData(r,t)},setupPositionProbePattern:function(e,t){for(let r=-1;r<=7;r++)if(!(e+r<=-1||this.moduleCount<=e+r))for(let a=-1;a<=7;a++)t+a<=-1||this.moduleCount<=t+a||(r>=0&&r<=6&&(0==a||6==a)||a>=0&&a<=6&&(0==r||6==r)||r>=2&&r<=4&&a>=2&&a<=4?this.modules[e+r][t+a]=!0:this.modules[e+r][t+a]=!1)},getBestMaskPattern:function(){let e=0,t=0;for(let r=0;r<8;r++){this.makeImpl(!0,r);const a=a.getLostPoint(this);(0==r||e>a)&&(e=a,t=r)}return t},createData:function(e,t){const r=a.getRSBlocks(e,t),i=new n;for(let e=0;e<this.dataList.length;e++){const t=this.dataList[e];i.put(t.mode,4),i.put(t.parsed.length,a.getLengthInBits(t.mode,e)),t.write(i)}let s=0;for(let e=0;e<r.length;e++)s+=r[e].dataCount;if(i.getLengthInBits()>8*s)throw new Error('code length overflow. ('+i.getLengthInBits()+'>'+8*s+')');for(i.getLengthInBits()+4<=8*s&&i.put(0,4);i.getLengthInBits()%8!=0;)i.putBit(!1);for(;;){if(i.getLengthInBits()>=8*s)break;i.put(a.PAD0,8);if(i.getLengthInBits()>=8*s)break;i.put(a.PAD1,8)}return a.createBytes(i,r)},createBytes:function(e,t){let r=0,a=0,i=0;const n=new Array(t.length),o=new Array(t.length);for(let s=0;s<t.length;s++){const l=t[s].dataCount,u=t[s].totalCount-l;a=Math.max(a,l),i=Math.max(i,u),n[s]=new Array(l);for(let t=0;t<n[s].length;t++)n[s][t]=255&e.buffer[t+r];r+=l;const c=a.getErrorCorrectPolynomial(u),d=new i(n[s],c.getLength()-1).mod(c);o[s]=new Array(c.getLength()-1);for(let e=0;e<o[s].length;e++){const t=e+d.getLength()-o[s].length;o[s][e]=t>=0?d.get(t):0}}let s=0;const l=[];for(let e=0;e<a;e++)for(let t=0;t<n.length;t++)e<n[t].length&&(l[s++]=n[t][e]);for(let e=0;e<i;e++)for(let t=0;t<o.length;t++)e<o[t].length&&(l[s++]=o[t][e]);return l},setupTimingPattern:function(){for(let e=8;e<this.moduleCount-8;e++)null==this.modules[e][6]&&(this.modules[e][6]=e%2==0);for(let e=8;e<this.moduleCount-8;e++)null==this.modules[6][e]&&(this.modules[6][e]=e%2==0)},setupPositionAdjustPattern:function(){const e=a.getPatternPosition(this.typeNumber);for(let t=0;t<e.length;t++)for(let r=0;r<e.length;r++){const a=e[t],i=e[r];null==this.modules[a][i]&&this.setupPositionAdjustPatternAt(a,i)}},setupPositionAdjustPatternAt:function(e,t){for(let r=-2;r<=2;r++)for(let a=-2;a<=2;a++)this.modules[e+r][t+a]=r==-2||r==2||a==-2||a==2||0==r&&0==a},setupTypeNumber:function(e){const t=a.getBCHTypeNumber(this.typeNumber);for(let r=0;r<18;r++){const a=!e&&1==(t>>r&1);this.modules[Math.floor(r/3)][r%3+this.moduleCount-8-3]=a}for(let r=0;r<18;r++){const a=!e&&1==(t>>r&1);this.modules[r%3+this.moduleCount-8-3][Math.floor(r/3)]=a}},setupTypeInfo:function(e,t){const r=a.getBCHTypeInfo(this.errorCorrectLevel<<3|t);for(let a=0;a<15;a++){const t=!e&&1==(r>>a&1);a<6?this.modules[a][8]=t:a<8?this.modules[a+1][8]=t:this.modules[this.moduleCount-15+a][8]=t}for(let a=0;a<15;a++){const t=!e&&1==(r>>a&1);a<8?this.modules[8][this.moduleCount-a-1]=t:a<9?this.modules[8][15-a-1+1]=t:this.modules[8][15-a-1]=t}this.modules[this.moduleCount-8][8]=!e},mapData:function(e,t){let r=this.moduleCount-1,a=this.moduleCount-1,i=-1;for(let n=0;n<this.moduleCount-1;n++){for(let o=0;o<this.moduleCount;o++){const s=this.moduleCount-1-o;for(let o=0;o<2;o++)if(null==this.modules[r][s-o]){let l=!1;a<e.length&&(l=1==(e[a]>>>i&1));const u=a.getMask(t,r,s-o);u&&(l=!l),this.modules[r][s-o]=l,i--;if(-1==i){a++,i=7}}}r+=i==1?-1:1,i=-i}}};const n=function(){this.buffer=[];this.length=0};n.prototype={get:function(e){const t=Math.floor(e/8);return 1==(this.buffer[t]>>>7-e%8&1)},put:function(e,t){for(let r=0;r<t;r++)this.putBit(1==(e>>>t-r-1&1))},getLengthInBits:function(){return this.length},putBit:function(e){const t=Math.floor(this.length/8);this.buffer.length<=t&&this.buffer.push(0),e&&(this.buffer[t]|=128>>>this.length%8),this.length++}};t.prototype={write:function(e){for(let t=0;t<this.parsed.length;t++)e.put(this.parsed[t],8)}};return r}();"
              "const wgPeers = [];"
-             "const statusMap = {bootstrap:[], wg:[]};"
+             "const statusMap = {wg:[]};"
              "let selfEndpoint = '';"
              "const escapeHtml = (text) => text.replace(/[&<>\"']/g, (c) => ({\"&\":\"&amp;\",\"<\":\"&lt;\",\">\":\"&gt;\",\"\\\"\":\"&quot;\",\"'\":\"&#39;\"}[c]));"
              "function renderQr(text){"
@@ -695,14 +697,30 @@ static void respond_mesh_ui(int fd) {
              "<td>${escapeHtml(peer.wg_ip||'')}</td>"
              "<td>${escapeHtml(String(peer.persistent_keepalive||''))}</td>"
              "<td>${escapeHtml(String(peer.web_port||''))}</td>"
-             "<td><span class='badge ${statusClass}'>${escapeHtml(status)}</span></td>`;"
+             "<td><span class='badge ${statusClass}'>${escapeHtml(status)}</span></td>"
+             "<td><button class='remove-peer' data-index='${index}'>Remove</button></td>`;"
              "tbody.appendChild(row);"
              "});"
+             "}"
+             "function toggleNodeStateUI(){"
+             "const nodeState=document.getElementById('node-state').value||'node';"
+             "const isEnd=nodeState==='end';"
+             "const syncDisabled=document.getElementById('sync-disabled');"
+             "const syncNew=document.getElementById('sync-new');"
+             "const copyJoin=document.getElementById('copy-join');"
+             "const joinConfig=document.getElementById('join-config');"
+             "syncDisabled.style.display=isEnd?'block':'none';"
+             "syncNew.disabled=isEnd;"
+             "copyJoin.disabled=isEnd;"
+             "joinConfig.disabled=isEnd;"
+             "if(isEnd){"
+             "joinConfig.value='';"
+             "renderQr('');"
+             "}"
              "}"
              "async function loadConfig(){"
              "const res=await fetch('/mesh/config');"
              "const data=await res.json();"
-             "document.getElementById('bootstrap-peers').value=(data.bootstrap_peers||[]).join('\\n');"
              "document.getElementById('node-state').value=data.node_state||'node';"
              "const self=data.self||{};"
              "selfEndpoint=self.endpoint||'';"
@@ -712,6 +730,7 @@ static void respond_mesh_ui(int fd) {
              "<div><strong>Endpoint:</strong> ${escapeHtml(self.endpoint||'')}</div>"
              "<div><strong>WireGuard port:</strong> ${escapeHtml(String(self.listen_port||''))}</div>"
              "<div><strong>Web port:</strong> ${escapeHtml(String(self.web_port||''))}</div>`;"
+             "toggleNodeStateUI();"
              "wgPeers.length=0;"
              "(data.wg_peers||[]).forEach(peer=>wgPeers.push(peer));"
              "await loadStatus();"
@@ -732,19 +751,23 @@ static void respond_mesh_ui(int fd) {
              "}else{"
              "statusBox.textContent='Mesh status unavailable.';"
              "}"
-             "statusMap.bootstrap=(data.bootstrap_peers||[]).map(p=>p.status);"
              "statusMap.wg=(data.wg_peers||[]).map(p=>p.status);"
-             "const bootstrapList=(data.bootstrap_peers||[]).map(p=>{"
-             "const status=(p.status||'connecting');"
-             "const statusClass=status.replace(/[^a-z0-9_-]/gi,'-');"
-             "return `<div><span class='badge ${statusClass}'>${escapeHtml(status)}</span> ${escapeHtml(p.endpoint||'')}</div>`;"
-             "}).join('');"
-             "document.getElementById('bootstrap-status').innerHTML=bootstrapList||'<em>No LAN peers.</em>';"
              "}"
+             "document.getElementById('node-state').addEventListener('change',()=>{"
+             "toggleNodeStateUI();"
+             "});"
+             "document.querySelector('#wg-peers tbody').addEventListener('click',(event)=>{"
+             "const target=event.target;"
+             "if(!target.classList.contains('remove-peer')){return;}"
+             "const index=parseInt(target.dataset.index,10);"
+             "if(Number.isNaN(index)){return;}"
+             "wgPeers.splice(index,1);"
+             "statusMap.wg.splice(index,1);"
+             "renderWgPeers();"
+             "});"
              "document.getElementById('save-config').addEventListener('click',async()=>{"
-             "const bootstrap=document.getElementById('bootstrap-peers').value.split('\\n').map(v=>v.trim()).filter(Boolean);"
              "const nodeState=document.getElementById('node-state').value||'node';"
-             "const res=await fetch('/mesh/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({bootstrap_peers:bootstrap,node_state:nodeState})});"
+             "const res=await fetch('/mesh/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({wg_peers:wgPeers,node_state:nodeState})});"
              "const msg=document.getElementById('save-status');"
              "if(res.ok){"
              "msg.textContent='Saved.';"
@@ -1137,6 +1160,13 @@ static int respond_mesh_join(int fd, junknas_config_t *config, const char *paylo
     if (cJSON_IsString(peer_endpoint_json) && peer_endpoint_json->valuestring) {
         peer_endpoint = peer_endpoint_json->valuestring;
     }
+    web_log_verbose(config,
+                    "mesh: join request parsed (peer_wg_ip=%s server_wg_ip=%s endpoint=%s web_port=%u allow_alternate=%d)",
+                    peer_wg_ip->valuestring,
+                    server_wg_ip->valuestring,
+                    endpoint_value[0] ? endpoint_value : "(none)",
+                    web_port,
+                    allow_alternate);
 
     wg_key private_key;
     if (wg_key_from_base64(private_key, peer_private->valuestring) != 0) {
@@ -1148,6 +1178,7 @@ static int respond_mesh_join(int fd, junknas_config_t *config, const char *paylo
     wg_key_b64_string public_b64;
     wg_generate_public_key(public_key, private_key);
     wg_key_to_base64(public_b64, public_key);
+    web_log_verbose(config, "mesh: join keys validated for %s", peer_wg_ip->valuestring);
 
     time_t now = time(NULL);
     junknas_config_lock(config);
@@ -1174,9 +1205,11 @@ static int respond_mesh_join(int fd, junknas_config_t *config, const char *paylo
     (void)junknas_config_save(config, config->config_file_path);
     junknas_config_unlock(config);
 
+    web_log_verbose(config, "mesh: join config saved (upserted=%d)", upserted);
     web_log_verbose(config, "mesh: joined via %s", server_peer.wg_ip);
 
     if (allow_alternate) {
+        web_log_verbose(config, "mesh: alternate join enabled; generating alternate keypair");
         char alternate_private[MAX_WG_KEY_LEN];
         char alternate_public[MAX_WG_KEY_LEN];
         if (generate_wg_keypair(alternate_private, sizeof(alternate_private),
