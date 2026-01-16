@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <time.h>
@@ -42,6 +43,133 @@ struct junknas_mesh {
 };
 
 static int mesh_apply_wireguard(struct junknas_mesh *mesh);
+
+static int read_entire_file(const char *path, char **out_buf, size_t *out_len) {
+    FILE *f = NULL;
+    char *buf = NULL;
+    long sz = 0;
+
+    if (!path || !out_buf) return -1;
+    *out_buf = NULL;
+    if (out_len) *out_len = 0;
+
+    f = fopen(path, "rb");
+    if (!f) return -1;
+
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    sz = ftell(f);
+    if (sz < 0) {
+        fclose(f);
+        return -1;
+    }
+
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+
+    buf = malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+
+    if (sz > 0) {
+        size_t got = fread(buf, 1, (size_t)sz, f);
+        if (got != (size_t)sz) {
+            free(buf);
+            fclose(f);
+            return -1;
+        }
+    }
+
+    buf[(size_t)sz] = '\0';
+    fclose(f);
+
+    *out_buf = buf;
+    if (out_len) *out_len = (size_t)sz;
+    return 0;
+}
+
+static int write_entire_file_atomic(const char *path, const char *data) {
+    if (!path || !data) return -1;
+
+    char tmp_path[MAX_PATH_LEN];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path) >= (int)sizeof(tmp_path)) {
+        return -1;
+    }
+
+    FILE *f = fopen(tmp_path, "wb");
+    if (!f) return -1;
+
+    size_t len = strlen(data);
+    if (len > 0) {
+        if (fwrite(data, 1, len, f) != len) {
+            fclose(f);
+            (void)remove(tmp_path);
+            return -1;
+        }
+    }
+
+    if (fflush(f) != 0) {
+        fclose(f);
+        (void)remove(tmp_path);
+        return -1;
+    }
+
+    fclose(f);
+
+    if (rename(tmp_path, path) != 0) {
+        (void)remove(tmp_path);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int normalize_key_string(const char *input, char *out, size_t out_len) {
+    if (!input || !out || out_len == 0) return -1;
+
+    while (*input && isspace((unsigned char)*input)) {
+        input++;
+    }
+
+    size_t len = strlen(input);
+    while (len > 0 && isspace((unsigned char)input[len - 1])) {
+        len--;
+    }
+
+    if (len == 0 || len >= out_len) return -1;
+    memcpy(out, input, len);
+    out[len] = '\0';
+    return 0;
+}
+
+static int build_private_key_path(const junknas_config_t *config, char *out, size_t out_len) {
+    if (!config || !out || out_len == 0) return -1;
+
+    if (config->config_file_path[0] == '\0') {
+        return snprintf(out, out_len, "private.key") >= (int)out_len ? -1 : 0;
+    }
+
+    const char *slash = strrchr(config->config_file_path, '/');
+    if (!slash) {
+        return snprintf(out, out_len, "private.key") >= (int)out_len ? -1 : 0;
+    }
+
+    size_t dir_len = (size_t)(slash - config->config_file_path);
+    if (dir_len == 0) {
+        return snprintf(out, out_len, "/private.key") >= (int)out_len ? -1 : 0;
+    }
+
+    return snprintf(out, out_len, "%.*s/private.key", (int)dir_len, config->config_file_path) >= (int)out_len
+               ? -1
+               : 0;
+}
 
 static int parse_endpoint(const char *endpoint, char *host, size_t host_len, uint16_t *port) {
     if (!endpoint || !host || !port) return -1;
@@ -562,7 +690,81 @@ static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
 static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
     if (!mesh || !mesh->config) return -1;
 
-    return junknas_config_ensure_wg_keys(mesh->config);
+    char private_key_path[MAX_PATH_LEN];
+    if (build_private_key_path(mesh->config, private_key_path, sizeof(private_key_path)) != 0) {
+        return -1;
+    }
+
+    junknas_config_lock(mesh->config);
+
+    wg_key private_key;
+    wg_key public_key;
+    wg_key_b64_string pub_b64;
+    bool have_private = false;
+    bool changed = false;
+    bool should_write_private = false;
+    bool file_loaded = false;
+
+    char *file_contents = NULL;
+    if (read_entire_file(private_key_path, &file_contents, NULL) == 0) {
+        char normalized[MAX_WG_KEY_LEN];
+        if (normalize_key_string(file_contents, normalized, sizeof(normalized)) == 0 &&
+            wg_key_from_base64(private_key, normalized) == 0) {
+            if (strcmp(mesh->config->wg.private_key, normalized) != 0) {
+                snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s", normalized);
+                changed = true;
+            }
+            have_private = true;
+            file_loaded = true;
+        }
+    }
+    free(file_contents);
+
+    if (!have_private) {
+        if (mesh->config->wg.private_key[0] != '\0' &&
+            wg_key_from_base64(private_key, mesh->config->wg.private_key) == 0) {
+            have_private = true;
+        } else {
+            wg_key_b64_string priv_b64;
+            wg_generate_private_key(private_key);
+            wg_key_to_base64(priv_b64, private_key);
+            snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s", priv_b64);
+            changed = true;
+            have_private = true;
+        }
+    }
+
+    if (!have_private) {
+        junknas_config_unlock(mesh->config);
+        return -1;
+    }
+
+    if (wg_key_from_base64(private_key, mesh->config->wg.private_key) != 0) {
+        junknas_config_unlock(mesh->config);
+        return -1;
+    }
+
+    wg_generate_public_key(public_key, private_key);
+    wg_key_to_base64(pub_b64, public_key);
+    if (strcmp(mesh->config->wg.public_key, pub_b64) != 0) {
+        snprintf(mesh->config->wg.public_key, sizeof(mesh->config->wg.public_key), "%s", pub_b64);
+        changed = true;
+    }
+
+    should_write_private = !file_loaded;
+    junknas_config_unlock(mesh->config);
+
+    if (should_write_private) {
+        if (write_entire_file_atomic(private_key_path, mesh->config->wg.private_key) != 0) {
+            return -1;
+        }
+    }
+
+    if (changed) {
+        return junknas_config_save(mesh->config, mesh->config->config_file_path);
+    }
+
+    return 0;
 }
 
 static void mesh_refresh_active(struct junknas_mesh *mesh) {

@@ -145,7 +145,7 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
  * Checks that paths exist, ports are valid, etc.
  * @param config        Pointer to config to validate
  * @return              0 if valid, -1 if invalid
- *r
+ */
 int junknas_config_validate(const junknas_config_t *config);
 
 /*
