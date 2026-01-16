@@ -267,6 +267,7 @@ static int fetch_public_ip(char *out, size_t out_len) {
 
 static int mesh_refresh_public_endpoint(struct junknas_mesh *mesh, int force) {
     if (!mesh || !mesh->config) return -1;
+    if (strcmp(mesh->config->node_state, NODE_STATE_END) == 0) return 0;
 
     char public_ip[64];
     if (fetch_public_ip(public_ip, sizeof(public_ip)) != 0) {
@@ -433,10 +434,6 @@ static int mesh_peer_from_json(cJSON *obj, junknas_wg_peer_t *peer) {
     if (cJSON_IsString(pub) && pub->valuestring) {
         snprintf(out.public_key, sizeof(out.public_key), "%s", pub->valuestring);
     }
-    cJSON *psk = cJSON_GetObjectItemCaseSensitive(obj, "preshared_key");
-    if (cJSON_IsString(psk) && psk->valuestring) {
-        snprintf(out.preshared_key, sizeof(out.preshared_key), "%s", psk->valuestring);
-    }
     cJSON *endpoint = cJSON_GetObjectItemCaseSensitive(obj, "endpoint");
     if (cJSON_IsString(endpoint) && endpoint->valuestring) {
         snprintf(out.endpoint, sizeof(out.endpoint), "%s", endpoint->valuestring);
@@ -462,7 +459,6 @@ static int mesh_peer_from_json(cJSON *obj, junknas_wg_peer_t *peer) {
 static int mesh_peer_equal(const junknas_wg_peer_t *a, const junknas_wg_peer_t *b) {
     if (!a || !b) return 0;
     if (strcmp(a->public_key, b->public_key) != 0) return 0;
-    if (strcmp(a->preshared_key, b->preshared_key) != 0) return 0;
     if (strcmp(a->endpoint, b->endpoint) != 0) return 0;
     if (strcmp(a->wg_ip, b->wg_ip) != 0) return 0;
     if (a->persistent_keepalive != b->persistent_keepalive) return 0;
@@ -475,7 +471,6 @@ static cJSON *mesh_peer_to_json(const junknas_wg_peer_t *peer) {
     cJSON *obj = cJSON_CreateObject();
     if (!obj) return NULL;
     cJSON_AddStringToObject(obj, "public_key", peer->public_key);
-    cJSON_AddStringToObject(obj, "preshared_key", peer->preshared_key);
     cJSON_AddStringToObject(obj, "endpoint", peer->endpoint);
     cJSON_AddStringToObject(obj, "wg_ip", peer->wg_ip);
     cJSON_AddNumberToObject(obj, "persistent_keepalive", (double)peer->persistent_keepalive);
@@ -590,41 +585,46 @@ static char *mesh_build_sync_payload(junknas_config_t *config) {
     cJSON *root = cJSON_CreateObject();
     if (!root) return NULL;
 
-    cJSON_AddNumberToObject(root, "updated_at", (double)config->wg_peers_updated_at);
-    cJSON_AddNumberToObject(root, "mounts_updated_at", (double)config->data_mount_points_updated_at);
+    if (strcmp(config->node_state, NODE_STATE_NODE) == 0) {
+        cJSON_AddNumberToObject(root, "updated_at", (double)config->wg_peers_updated_at);
+        cJSON_AddNumberToObject(root, "mounts_updated_at", (double)config->data_mount_points_updated_at);
 
-    cJSON *self = cJSON_CreateObject();
-    if (!self) {
-        cJSON_Delete(root);
-        return NULL;
-    }
-    cJSON_AddStringToObject(self, "public_key", config->wg.public_key);
-    cJSON_AddStringToObject(self, "endpoint", config->wg.endpoint);
-    cJSON_AddStringToObject(self, "wg_ip", config->wg.wg_ip);
-    cJSON_AddNumberToObject(self, "web_port", (double)config->web_port);
-    cJSON_AddNumberToObject(self, "persistent_keepalive", 0);
-    cJSON_AddNumberToObject(self, "listen_port", (double)config->wg.listen_port);
-    cJSON_AddItemToObject(root, "self", self);
+        cJSON *self = cJSON_CreateObject();
+        if (!self) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddStringToObject(self, "public_key", config->wg.public_key);
+        cJSON_AddStringToObject(self, "endpoint", config->wg.endpoint);
+        cJSON_AddStringToObject(self, "wg_ip", config->wg.wg_ip);
+        cJSON_AddNumberToObject(self, "web_port", (double)config->web_port);
+        cJSON_AddNumberToObject(self, "persistent_keepalive", 0);
+        cJSON_AddNumberToObject(self, "listen_port", (double)config->wg.listen_port);
+        cJSON_AddItemToObject(root, "self", self);
 
-    cJSON *peers = cJSON_CreateArray();
-    if (!peers) {
-        cJSON_Delete(root);
-        return NULL;
-    }
-    cJSON_AddItemToObject(root, "peers", peers);
-    for (int i = 0; i < config->wg_peer_count; i++) {
-        cJSON *entry = mesh_peer_to_json(&config->wg_peers[i]);
-        if (entry) cJSON_AddItemToArray(peers, entry);
-    }
+        cJSON *peers = cJSON_CreateArray();
+        if (!peers) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddItemToObject(root, "peers", peers);
+        for (int i = 0; i < config->wg_peer_count; i++) {
+            cJSON *entry = mesh_peer_to_json(&config->wg_peers[i]);
+            if (entry) cJSON_AddItemToArray(peers, entry);
+        }
 
-    cJSON *mounts = cJSON_CreateArray();
-    if (!mounts) {
-        cJSON_Delete(root);
-        return NULL;
-    }
-    cJSON_AddItemToObject(root, "mount_points", mounts);
-    for (int i = 0; i < config->data_mount_point_count; i++) {
-        cJSON_AddItemToArray(mounts, cJSON_CreateString(config->data_mount_points[i]));
+        cJSON *mounts = cJSON_CreateArray();
+        if (!mounts) {
+            cJSON_Delete(root);
+            return NULL;
+        }
+        cJSON_AddItemToObject(root, "mount_points", mounts);
+        for (int i = 0; i < config->data_mount_point_count; i++) {
+            cJSON_AddItemToArray(mounts, cJSON_CreateString(config->data_mount_points[i]));
+        }
+    } else {
+        cJSON_AddNumberToObject(root, "updated_at", 0.0);
+        cJSON_AddNumberToObject(root, "mounts_updated_at", 0.0);
     }
 
     char *printed = cJSON_PrintUnformatted(root);
@@ -733,12 +733,6 @@ static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
         if (wg_key_from_base64(peer->public_key, peers[i].public_key) != 0) {
             free(peer);
             continue;
-        }
-
-        if (peers[i].preshared_key[0] != '\0') {
-            if (wg_key_from_base64(peer->preshared_key, peers[i].preshared_key) == 0) {
-                peer->flags |= WGPEER_HAS_PRESHARED_KEY;
-            }
         }
 
         if (peers[i].persistent_keepalive > 0) {

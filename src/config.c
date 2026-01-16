@@ -587,7 +587,6 @@ void junknas_config_unlock(junknas_config_t *config) {
 static int wg_peer_equal(const junknas_wg_peer_t *a, const junknas_wg_peer_t *b) {
     if (!a || !b) return 0;
     if (strcmp(a->public_key, b->public_key) != 0) return 0;
-    if (strcmp(a->preshared_key, b->preshared_key) != 0) return 0;
     if (strcmp(a->endpoint, b->endpoint) != 0) return 0;
     if (strcmp(a->wg_ip, b->wg_ip) != 0) return 0;
     if (a->persistent_keepalive != b->persistent_keepalive) return 0;
@@ -644,6 +643,11 @@ static void config_log_verbose(const junknas_config_t *config, const char *fmt, 
     va_end(args);
 }
 
+static int is_valid_node_state(const char *state) {
+    if (!state) return 0;
+    return (strcmp(state, NODE_STATE_NODE) == 0 || strcmp(state, NODE_STATE_END) == 0);
+}
+
 static void set_defaults(junknas_config_t *config) {
     /* This function sets the full config structure to known defaults. */
     memset(config, 0, sizeof(*config));
@@ -662,6 +666,9 @@ static void set_defaults(junknas_config_t *config) {
 
     /* Web */
     config->web_port = (uint16_t)DEFAULT_WEB_PORT;
+
+    /* Node role */
+    (void)safe_strcpy(config->node_state, sizeof(config->node_state), NODE_STATE_NODE);
 
     /* Runtime flags (sane defaults) */
     config->verbose = 0;
@@ -709,6 +716,8 @@ int junknas_config_validate(const junknas_config_t *config) {
     /* Ports: must be non-zero and within uint16 range already */
     if (config->web_port == 0) return -1;
     if (config->wg.listen_port == 0) return -1;
+
+    if (!is_valid_node_state(config->node_state)) return -1;
 
     /* Basic string sanity */
     if (config->data_dir[0] == '\0') return -1;
@@ -925,6 +934,12 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
     if (cJSON_IsBool(daemon_mode)) config->daemon_mode = cJSON_IsTrue(daemon_mode) ? 1 : 0;
     if (cJSON_IsNumber(daemon_mode)) config->daemon_mode = (daemon_mode->valueint != 0);
 
+    cJSON *node_state = cJSON_GetObjectItemCaseSensitive(root, "node_state");
+    if (cJSON_IsString(node_state) && node_state->valuestring &&
+        is_valid_node_state(node_state->valuestring)) {
+        (void)safe_strcpy(config->node_state, sizeof(config->node_state), node_state->valuestring);
+    }
+
     /* wireguard object */
     cJSON *wg = cJSON_GetObjectItemCaseSensitive(root, "wireguard");
     if (cJSON_IsObject(wg)) {
@@ -1018,10 +1033,6 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
             if (cJSON_IsString(pub) && pub->valuestring) {
                 (void)safe_strcpy(peer.public_key, sizeof(peer.public_key), pub->valuestring);
             }
-            cJSON *psk = cJSON_GetObjectItemCaseSensitive(p, "preshared_key");
-            if (cJSON_IsString(psk) && psk->valuestring) {
-                (void)safe_strcpy(peer.preshared_key, sizeof(peer.preshared_key), psk->valuestring);
-            }
             cJSON *endpoint = cJSON_GetObjectItemCaseSensitive(p, "endpoint");
             if (cJSON_IsString(endpoint) && endpoint->valuestring) {
                 (void)safe_strcpy(peer.endpoint, sizeof(peer.endpoint), endpoint->valuestring);
@@ -1078,6 +1089,7 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
     }
     cJSON_AddStringToObject(root, "mount_point", config->mount_point);
     cJSON_AddNumberToObject(root, "web_port", (double)config->web_port);
+    cJSON_AddStringToObject(root, "node_state", config->node_state);
 
     cJSON_AddBoolToObject(root, "verbose", config->verbose ? 1 : 0);
     cJSON_AddBoolToObject(root, "enable_fuse", config->enable_fuse ? 1 : 0);
@@ -1140,7 +1152,6 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
             return -1;
         }
         cJSON_AddStringToObject(peer, "public_key", config->wg_peers[i].public_key);
-        cJSON_AddStringToObject(peer, "preshared_key", config->wg_peers[i].preshared_key);
         cJSON_AddStringToObject(peer, "endpoint", config->wg_peers[i].endpoint);
         cJSON_AddStringToObject(peer, "wg_ip", config->wg_peers[i].wg_ip);
         cJSON_AddNumberToObject(peer, "persistent_keepalive",

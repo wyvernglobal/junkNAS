@@ -4,6 +4,7 @@
 	"data_dirs":	["/tmp/junknas-data"],
 	"mount_point":	"/tmp/junknas-mount",
 	"web_port":	9090,
+	"node_state":	"node",
 	"verbose":	true,
 	"enable_fuse":	true,
 	"daemon_mode":	false,
@@ -22,7 +23,6 @@
 	"data_mount_points_updated_at":	0,
 	"wg_peers":	[{
 			"public_key":	"BASE64_PUBLIC_KEY_HERE",
-			"preshared_key":	"",
 			"endpoint":	"10.0.0.1:51820",
 			"wg_ip":	"10.99.0.2",
 			"persistent_keepalive":	25,
