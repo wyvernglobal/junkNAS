@@ -47,9 +47,20 @@ BIN_JUNKNAS := $(BIN_DIR)/junknas_fuse
 BIN_TEST_CONFIG := $(BIN_DIR)/test_config
 BIN_TEST_WG := $(BIN_DIR)/test_wireguard
 
-.PHONY: all init clean
+CONFIG_DIR := $(HOME)/.config/junkNAS
+CONFIG_FILE := $(CONFIG_DIR)/config.json
+CONFIG_TEMPLATE := config.test.json
 
-all: $(BIN_JUNKNAS) $(BIN_TEST_CONFIG) $(BIN_TEST_WG)
+.PHONY: all init clean config
+
+all: $(BIN_JUNKNAS) $(BIN_TEST_CONFIG) $(BIN_TEST_WG) config
+
+config:
+	@mkdir -p $(CONFIG_DIR)
+	@if [ ! -f "$(CONFIG_FILE)" ]; then \
+		cp $(CONFIG_TEMPLATE) $(CONFIG_FILE); \
+		echo "Copied default config to $(CONFIG_FILE)."; \
+	fi
 
 init: all
 	@mkdir -p $(HOME)/.config/junkNAS $(HOME)/.local/share/junknas/data /mnt/junknas

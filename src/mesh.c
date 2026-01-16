@@ -53,11 +53,110 @@ struct junknas_mesh {
     uint64_t last_applied_peers_updated_at;
     time_t last_public_ip_check;
     char last_public_ip[64];
+    struct {
+        char public_key[MAX_WG_KEY_LEN];
+        uint64_t last_rx_bytes;
+        uint64_t last_tx_bytes;
+        int handshake_confirmed;
+    } peer_stats[MESH_MAX_PEERS];
+    int peer_stats_count;
 };
 
 static int mesh_apply_wireguard(struct junknas_mesh *mesh);
 static char *http_request_body(const char *host, uint16_t port, const char *request,
                                const char *body, size_t body_len, int *out_status);
+
+static void mesh_record_peer_stats(struct junknas_mesh *mesh, const wg_peer *peer) {
+    if (!mesh || !peer) return;
+
+    wg_key_b64_string public_key;
+    wg_key_to_base64(public_key, peer->public_key);
+
+    int idx = -1;
+    for (int i = 0; i < mesh->peer_stats_count; i++) {
+        if (strcmp(mesh->peer_stats[i].public_key, public_key) == 0) {
+            idx = i;
+            break;
+        }
+    }
+
+    if (idx < 0) {
+        if (mesh->peer_stats_count >= MESH_MAX_PEERS) {
+            return;
+        }
+        idx = mesh->peer_stats_count++;
+        memset(&mesh->peer_stats[idx], 0, sizeof(mesh->peer_stats[idx]));
+        snprintf(mesh->peer_stats[idx].public_key, sizeof(mesh->peer_stats[idx].public_key), "%s", public_key);
+    }
+
+    mesh->peer_stats[idx].last_rx_bytes = peer->rx_bytes;
+    mesh->peer_stats[idx].last_tx_bytes = peer->tx_bytes;
+    mesh->peer_stats[idx].handshake_confirmed = (peer->last_handshake_time.tv_sec != 0);
+}
+
+static void mesh_log_peer_packets(struct junknas_mesh *mesh) {
+    if (!mesh || !mesh->config || !mesh->config->verbose) return;
+
+    char iface[32];
+    junknas_config_lock(mesh->config);
+    snprintf(iface, sizeof(iface), "%s", mesh->config->wg.interface_name);
+    junknas_config_unlock(mesh->config);
+
+    wg_device *dev = NULL;
+    if (wg_get_device(&dev, iface) != 0 || !dev) return;
+
+    for (wg_peer *peer = dev->first_peer; peer; peer = peer->next_peer) {
+        wg_key_b64_string public_key;
+        wg_key_to_base64(public_key, peer->public_key);
+
+        int idx = -1;
+        for (int i = 0; i < mesh->peer_stats_count; i++) {
+            if (strcmp(mesh->peer_stats[i].public_key, public_key) == 0) {
+                idx = i;
+                break;
+            }
+        }
+
+        uint64_t last_rx = 0;
+        uint64_t last_tx = 0;
+        int handshake_confirmed = 0;
+        if (idx >= 0) {
+            last_rx = mesh->peer_stats[idx].last_rx_bytes;
+            last_tx = mesh->peer_stats[idx].last_tx_bytes;
+            handshake_confirmed = mesh->peer_stats[idx].handshake_confirmed;
+        }
+
+        uint64_t rx_delta = (peer->rx_bytes >= last_rx) ? (peer->rx_bytes - last_rx) : peer->rx_bytes;
+        uint64_t tx_delta = (peer->tx_bytes >= last_tx) ? (peer->tx_bytes - last_tx) : peer->tx_bytes;
+        int handshake_now = (peer->last_handshake_time.tv_sec != 0);
+
+        if (!handshake_now && (rx_delta > 0 || tx_delta > 0)) {
+            mesh_log_verbose(mesh->config,
+                             "mesh: handshake pending for %s (tx=%llu +%llu, rx=%llu +%llu)",
+                             public_key,
+                             (unsigned long long)peer->tx_bytes,
+                             (unsigned long long)tx_delta,
+                             (unsigned long long)peer->rx_bytes,
+                             (unsigned long long)rx_delta);
+        }
+
+        if (handshake_now && !handshake_confirmed) {
+            mesh_log_verbose(mesh->config, "mesh: handshake confirmed for %s", public_key);
+        }
+
+        if (rx_delta > 0) {
+            mesh_log_verbose(mesh->config,
+                             "mesh: received %llu bytes from %s (total rx=%llu)",
+                             (unsigned long long)rx_delta,
+                             public_key,
+                             (unsigned long long)peer->rx_bytes);
+        }
+
+        mesh_record_peer_stats(mesh, peer);
+    }
+
+    wg_free_device(dev);
+}
 
 static int read_entire_file(const char *path, char **out_buf, size_t *out_len) {
     FILE *f = NULL;
@@ -173,6 +272,45 @@ static int ensure_config_dir(void) {
         return -1;
     }
     return 0;
+}
+
+static int ensure_dir_recursive(const char *path) {
+    if (!path || path[0] == '\0') return -1;
+
+    char tmp[MAX_PATH_LEN];
+    size_t len = strlen(path);
+    if (len >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, len + 1);
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+                return -1;
+            }
+            *p = '/';
+        }
+    }
+
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ensure_parent_dir(const char *path) {
+    if (!path || path[0] == '\0') return -1;
+    const char *slash = strrchr(path, '/');
+    if (!slash) return 0;
+    size_t dir_len = (size_t)(slash - path);
+    if (dir_len == 0 || dir_len >= MAX_PATH_LEN) {
+        return 0;
+    }
+    char dir[MAX_PATH_LEN];
+    memcpy(dir, path, dir_len);
+    dir[dir_len] = '\0';
+    return ensure_dir_recursive(dir);
 }
 
 static int build_private_key_path(const junknas_config_t *config, char *out, size_t out_len) {
@@ -895,7 +1033,7 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
     junknas_config_unlock(mesh->config);
 
     if (should_write_private) {
-        if (ensure_config_dir() != 0) {
+        if (ensure_parent_dir(private_key_path) != 0) {
             char config_dir[MAX_PATH_LEN];
             if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
                 mesh_log_verbose(mesh->config, "mesh: failed to ensure config dir (unable to resolve path)");
@@ -993,6 +1131,8 @@ static void *mesh_listener_thread(void *arg) {
         if (!did_sync) {
             mesh_refresh_active(mesh);
         }
+
+        mesh_log_peer_packets(mesh);
 
         for (int i = 0; i < MESH_SYNC_INTERVAL_SEC && !mesh->stop; i++) {
             sleep(1);

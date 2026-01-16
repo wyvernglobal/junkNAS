@@ -555,6 +555,45 @@ static int ensure_config_dir(void) {
     return 0;
 }
 
+static int ensure_dir_recursive(const char *path) {
+    if (!path || path[0] == '\0') return -1;
+
+    char tmp[MAX_PATH_LEN];
+    size_t len = strlen(path);
+    if (len >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, len + 1);
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+                return -1;
+            }
+            *p = '/';
+        }
+    }
+
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ensure_parent_dir(const char *path) {
+    if (!path || path[0] == '\0') return -1;
+    const char *slash = strrchr(path, '/');
+    if (!slash) return 0;
+    size_t dir_len = (size_t)(slash - path);
+    if (dir_len == 0 || dir_len >= MAX_PATH_LEN) {
+        return 0;
+    }
+    char dir[MAX_PATH_LEN];
+    memcpy(dir, path, dir_len);
+    dir[dir_len] = '\0';
+    return ensure_dir_recursive(dir);
+}
+
 static int build_config_file_path(const char *config_file, char *out, size_t out_len) {
     if (!out || out_len == 0) return -1;
     char config_dir[MAX_PATH_LEN];
@@ -968,7 +1007,7 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
     junknas_config_unlock(config);
 
     if (should_write_private) {
-        if (ensure_config_dir() != 0) {
+        if (ensure_parent_dir(private_key_path) != 0) {
             char config_dir[MAX_PATH_LEN];
             if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
                 config_log_verbose(config, "config: failed to ensure config dir (unable to resolve path)");
@@ -1324,7 +1363,7 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
 
     if (!printed) return -1;
 
-    if (ensure_config_dir() != 0) {
+    if (ensure_parent_dir(config_file) != 0) {
         free(printed);
         return -1;
     }
