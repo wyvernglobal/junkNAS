@@ -185,6 +185,12 @@ static int build_private_key_path(const junknas_config_t *config, char *out, siz
                : 0;
 }
 
+static int build_private_key_fallback_path(const junknas_config_t *config, char *out, size_t out_len) {
+    if (!config || !out || out_len == 0) return -1;
+    if (config->data_dir[0] == '\0') return -1;
+    return snprintf(out, out_len, "%s/private.key", config->data_dir) >= (int)out_len ? -1 : 0;
+}
+
 static int parse_endpoint(const char *endpoint, char *host, size_t host_len, uint16_t *port) {
     if (!endpoint || !host || !port) return -1;
     const char *colon = strrchr(endpoint, ':');
@@ -784,9 +790,15 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
     if (!mesh || !mesh->config) return -1;
 
     char private_key_path[MAX_PATH_LEN];
+    char fallback_key_path[MAX_PATH_LEN];
+    bool have_fallback_path = false;
     if (build_private_key_path(mesh->config, private_key_path, sizeof(private_key_path)) != 0) {
         mesh_log_verbose(mesh->config, "mesh: failed to build WireGuard key path");
         return -1;
+    }
+    if (build_private_key_fallback_path(mesh->config, fallback_key_path, sizeof(fallback_key_path)) == 0 &&
+        strcmp(fallback_key_path, private_key_path) != 0) {
+        have_fallback_path = true;
     }
 
     mesh_log_verbose(mesh->config, "mesh: ensuring WireGuard keys in %s", private_key_path);
@@ -817,6 +829,29 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
         mesh_log_verbose(mesh->config, "mesh: no private key file found at %s", private_key_path);
     }
     free(file_contents);
+    file_contents = NULL;
+
+    if (!have_private && have_fallback_path) {
+        if (read_entire_file(fallback_key_path, &file_contents, NULL) == 0) {
+            char normalized[MAX_WG_KEY_LEN];
+            if (normalize_key_string(file_contents, normalized, sizeof(normalized)) == 0 &&
+                wg_key_from_base64(private_key, normalized) == 0) {
+                if (strcmp(mesh->config->wg.private_key, normalized) != 0) {
+                    snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s",
+                             normalized);
+                    changed = true;
+                }
+                have_private = true;
+                file_loaded = true;
+                mesh_log_verbose(mesh->config, "mesh: loaded existing WireGuard private key from %s",
+                                 fallback_key_path);
+            }
+        } else {
+            mesh_log_verbose(mesh->config, "mesh: no private key file found at %s", fallback_key_path);
+        }
+        free(file_contents);
+        file_contents = NULL;
+    }
 
     if (!have_private) {
         if (mesh->config->wg.private_key[0] != '\0' &&
@@ -858,10 +893,17 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
 
     if (should_write_private) {
         if (write_entire_file_atomic(private_key_path, mesh->config->wg.private_key) != 0) {
-            mesh_log_verbose(mesh->config, "mesh: failed to write private key to %s", private_key_path);
-            return -1;
+            mesh_log_verbose(mesh->config,
+                             "mesh: failed to write private key to %s (continuing without key file)",
+                             private_key_path);
+            if (have_fallback_path &&
+                write_entire_file_atomic(fallback_key_path, mesh->config->wg.private_key) == 0) {
+                mesh_log_verbose(mesh->config, "mesh: wrote WireGuard private key to %s",
+                                 fallback_key_path);
+            }
+        } else {
+            mesh_log_verbose(mesh->config, "mesh: wrote WireGuard private key to %s", private_key_path);
         }
-        mesh_log_verbose(mesh->config, "mesh: wrote WireGuard private key to %s", private_key_path);
     }
 
     if (changed) {
