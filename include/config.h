@@ -125,6 +125,12 @@ typedef struct {
 int junknas_config_init(junknas_config_t *config, const char *config_file);
 
 /*
+ * Enable verbose startup logging before config initialization.
+ * This does not persist to the config file and is intended for -v usage.
+ */
+void junknas_config_set_startup_verbose(int verbose);
+
+/*
  * Load configuration from a JSON file
  * @param config        Pointer to config structure to populate
  * @param config_file   Path to JSON config file

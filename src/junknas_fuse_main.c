@@ -16,6 +16,7 @@
  */
 
 #include <limits.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,12 +29,21 @@
 static void print_usage(const char *argv0) {
     fprintf(stderr,
             "Usage:\n"
-            "  %s <config.json>\n"
-            "  %s <config.json> bootstrap-peers list\n"
-            "  %s <config.json> bootstrap-peers add <host:port>\n"
-            "  %s <config.json> bootstrap-peers delete <index>\n"
-            "  %s <config.json> bootstrap-peers edit <index> <host:port>\n",
+            "  %s [-v|--verbose] <config.json>\n"
+            "  %s [-v|--verbose] <config.json> bootstrap-peers list\n"
+            "  %s [-v|--verbose] <config.json> bootstrap-peers add <host:port>\n"
+            "  %s [-v|--verbose] <config.json> bootstrap-peers delete <index>\n"
+            "  %s [-v|--verbose] <config.json> bootstrap-peers edit <index> <host:port>\n",
             argv0, argv0, argv0, argv0, argv0);
+}
+
+static void log_verbose(int verbose, const char *fmt, ...) {
+    if (!verbose) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
 }
 
 static int parse_uint_index(const char *text, int *out_index) {
@@ -215,12 +225,20 @@ static int handle_bootstrap_peers_command(junknas_config_t *cfg,
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
+    int startup_verbose = 0;
+    int arg_start = 1;
+    if (argc > 1 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--verbose") == 0)) {
+        startup_verbose = 1;
+        arg_start++;
+    }
+
+    if (argc <= arg_start) {
         print_usage(argv[0]);
         return 2;
     }
 
-    const char *config_path = argv[1];
+    const char *config_path = argv[arg_start];
+    junknas_config_set_startup_verbose(startup_verbose);
 
     junknas_config_t cfg;
     if (junknas_config_init(&cfg, config_path) != 0) {
@@ -228,8 +246,16 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (argc >= 3 && strcmp(argv[2], "bootstrap-peers") == 0) {
-        return handle_bootstrap_peers_command(&cfg, argc - 2, argv + 2, config_path);
+    if (startup_verbose) {
+        cfg.verbose = 1;
+    }
+
+    log_verbose(cfg.verbose, "startup: config loaded from %s", config_path);
+
+    int cmd_argc = argc - arg_start;
+    char **cmd_argv = argv + arg_start;
+    if (cmd_argc >= 2 && strcmp(cmd_argv[1], "bootstrap-peers") == 0) {
+        return handle_bootstrap_peers_command(&cfg, cmd_argc - 1, cmd_argv + 1, config_path);
     }
 
     if (!cfg.enable_fuse) {
@@ -237,20 +263,27 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    log_verbose(cfg.verbose, "startup: establishing mesh");
     junknas_mesh_t *mesh = junknas_mesh_start(&cfg);
     if (!mesh) {
         fprintf(stderr, "Warning: failed to start mesh; running standalone.\n");
+    } else {
+        log_verbose(cfg.verbose, "startup: mesh started");
     }
 
+    log_verbose(cfg.verbose, "startup: establishing web UI on port %u", cfg.web_port);
     junknas_web_server_t *web = junknas_web_server_start(&cfg);
     if (!web) {
         fprintf(stderr, "Warning: failed to start web server on port %u.\n", cfg.web_port);
+    } else {
+        log_verbose(cfg.verbose, "startup: web UI ready on port %u", cfg.web_port);
     }
 
     /* We pass argc/argv to FUSE so you can add options later.
      * But note: FUSE will also see your config path argument.
      * That’s fine for now because we explicitly add cfg.mount_point.
      */
+    log_verbose(cfg.verbose, "startup: establishing FUSE at %s", cfg.mount_point);
     int rc = (junknas_fuse_run(&cfg, mesh, argc, argv) == 0) ? 0 : 1;
 
     if (web) junknas_web_server_stop(web);

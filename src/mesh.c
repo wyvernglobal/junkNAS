@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
 #include <sys/socket.h>
@@ -26,6 +27,15 @@
 #define MESH_MAX_PEERS   MAX_WG_PEERS
 #define MESH_CONNECT_TIMEOUT_SEC 1
 #define MESH_SYNC_INTERVAL_SEC 5
+
+static void mesh_log_verbose(const junknas_config_t *config, const char *fmt, ...) {
+    if (!config || !config->verbose) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
 
 typedef struct {
     char wg_ip[16];
@@ -315,6 +325,7 @@ static void mesh_ensure_local_mount(struct junknas_mesh *mesh) {
     if (!mesh_mount_points_contains(mesh->config, mesh->config->mount_point)) {
         (void)junknas_config_add_data_mount_point(mesh->config, mesh->config->mount_point);
         mesh->config->data_mount_points_updated_at = (uint64_t)time(NULL);
+        mesh_log_verbose(mesh->config, "mesh: added local mount point %s", mesh->config->mount_point);
     }
     junknas_config_unlock(mesh->config);
 }
@@ -692,9 +703,11 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
 
     char private_key_path[MAX_PATH_LEN];
     if (build_private_key_path(mesh->config, private_key_path, sizeof(private_key_path)) != 0) {
+        mesh_log_verbose(mesh->config, "mesh: failed to build WireGuard key path");
         return -1;
     }
 
+    mesh_log_verbose(mesh->config, "mesh: ensuring WireGuard keys in %s", private_key_path);
     junknas_config_lock(mesh->config);
 
     wg_key private_key;
@@ -716,7 +729,10 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
             }
             have_private = true;
             file_loaded = true;
+            mesh_log_verbose(mesh->config, "mesh: loaded existing WireGuard private key");
         }
+    } else {
+        mesh_log_verbose(mesh->config, "mesh: no private key file found at %s", private_key_path);
     }
     free(file_contents);
 
@@ -731,16 +747,19 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
             snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s", priv_b64);
             changed = true;
             have_private = true;
+            mesh_log_verbose(mesh->config, "mesh: generated new WireGuard private key");
         }
     }
 
     if (!have_private) {
         junknas_config_unlock(mesh->config);
+        mesh_log_verbose(mesh->config, "mesh: failed to obtain WireGuard private key");
         return -1;
     }
 
     if (wg_key_from_base64(private_key, mesh->config->wg.private_key) != 0) {
         junknas_config_unlock(mesh->config);
+        mesh_log_verbose(mesh->config, "mesh: WireGuard private key is invalid");
         return -1;
     }
 
@@ -749,6 +768,7 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
     if (strcmp(mesh->config->wg.public_key, pub_b64) != 0) {
         snprintf(mesh->config->wg.public_key, sizeof(mesh->config->wg.public_key), "%s", pub_b64);
         changed = true;
+        mesh_log_verbose(mesh->config, "mesh: updated WireGuard public key");
     }
 
     should_write_private = !file_loaded;
@@ -756,11 +776,15 @@ static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
 
     if (should_write_private) {
         if (write_entire_file_atomic(private_key_path, mesh->config->wg.private_key) != 0) {
+            mesh_log_verbose(mesh->config, "mesh: failed to write private key to %s", private_key_path);
             return -1;
         }
+        mesh_log_verbose(mesh->config, "mesh: wrote WireGuard private key to %s", private_key_path);
     }
 
     if (changed) {
+        mesh_log_verbose(mesh->config, "mesh: saving updated WireGuard keys to %s",
+                         mesh->config->config_file_path);
         return junknas_config_save(mesh->config, mesh->config->config_file_path);
     }
 
@@ -978,20 +1002,24 @@ junknas_mesh_t *junknas_mesh_start(junknas_config_t *config) {
     mesh->config = config;
     pthread_mutex_init(&mesh->lock, NULL);
 
+    mesh_log_verbose(config, "mesh: starting mesh services");
     mesh_ensure_local_mount(mesh);
 
     if (mesh_ensure_wg_keys(mesh) != 0) {
+        mesh_log_verbose(config, "mesh: WireGuard key setup failed");
         pthread_mutex_destroy(&mesh->lock);
         free(mesh);
         return NULL;
     }
 
+    mesh_log_verbose(config, "mesh: applying WireGuard configuration");
     (void)mesh_apply_wireguard(mesh);
     junknas_config_lock(mesh->config);
     mesh->last_applied_peers_updated_at = mesh->config->wg_peers_updated_at;
     junknas_config_unlock(mesh->config);
 
     if (pthread_create(&mesh->listener, NULL, mesh_listener_thread, mesh) != 0) {
+        mesh_log_verbose(config, "mesh: failed to start mesh listener thread");
         pthread_mutex_destroy(&mesh->lock);
         free(mesh);
         return NULL;
@@ -1000,6 +1028,7 @@ junknas_mesh_t *junknas_mesh_start(junknas_config_t *config) {
     if (config->bootstrap_peer_count == 0) {
         mesh->standalone = 1;
         mesh_refresh_active(mesh);
+        mesh_log_verbose(config, "mesh: running in standalone mode (no bootstrap peers)");
         return mesh;
     }
 

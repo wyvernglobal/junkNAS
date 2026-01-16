@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -37,6 +38,15 @@ typedef struct {
     int fd;
     junknas_config_t *config;
 } web_conn_t;
+
+static void web_log_verbose(const junknas_config_t *config, const char *fmt, ...) {
+    if (!config || !config->verbose) return;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
 
 static int is_safe_relative(const char *path) {
     if (!path) return 0;
@@ -620,11 +630,15 @@ junknas_web_server_t *junknas_web_server_start(junknas_config_t *config) {
     if (!config) return NULL;
 
     struct junknas_web_server *server = calloc(1, sizeof(*server));
-    if (!server) return NULL;
+    if (!server) {
+        web_log_verbose(config, "web: failed to allocate server");
+        return NULL;
+    }
 
     server->config = config;
     server->fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server->fd < 0) {
+        web_log_verbose(config, "web: failed to create socket");
         free(server);
         return NULL;
     }
@@ -639,23 +653,27 @@ junknas_web_server_t *junknas_web_server_start(junknas_config_t *config) {
     addr.sin_port = htons(config->web_port);
 
     if (bind(server->fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        web_log_verbose(config, "web: bind failed on port %u", config->web_port);
         close(server->fd);
         free(server);
         return NULL;
     }
 
     if (listen(server->fd, WEB_BACKLOG) != 0) {
+        web_log_verbose(config, "web: listen failed on port %u", config->web_port);
         close(server->fd);
         free(server);
         return NULL;
     }
 
     if (pthread_create(&server->thread, NULL, server_thread, server) != 0) {
+        web_log_verbose(config, "web: failed to start web server thread");
         close(server->fd);
         free(server);
         return NULL;
     }
 
+    web_log_verbose(config, "web: server listening on port %u", config->web_port);
     return server;
 }
 
