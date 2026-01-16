@@ -972,6 +972,7 @@ static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
     char private_key_b64[MAX_WG_KEY_LEN];
     snprintf(private_key_b64, sizeof(private_key_b64), "%s", mesh->config->wg.private_key);
     uint16_t listen_port = mesh->config->wg.listen_port;
+    uint16_t default_keepalive = mesh->config->wg_peer_keepalive;
     junknas_config_unlock(mesh->config);
 
     mesh_log_verbose(mesh->config,
@@ -1017,8 +1018,12 @@ static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
             continue;
         }
 
-        if (peers[i].persistent_keepalive > 0) {
-            peer->persistent_keepalive_interval = peers[i].persistent_keepalive;
+        uint16_t keepalive = peers[i].persistent_keepalive;
+        if (keepalive == 0) {
+            keepalive = default_keepalive;
+        }
+        if (keepalive > 0) {
+            peer->persistent_keepalive_interval = keepalive;
             peer->flags |= WGPEER_HAS_PERSISTENT_KEEPALIVE_INTERVAL;
         }
 

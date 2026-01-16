@@ -854,6 +854,7 @@ static void set_defaults(junknas_config_t *config) {
     config->wg.endpoint[0] = '\0';
     config->wg.listen_port = (uint16_t)DEFAULT_WG_PORT;
     config->wg.mtu = 0;
+    config->wg_peer_keepalive = DEFAULT_WG_KEEPALIVE;
 
     /* Bootstrap list */
     config->bootstrap_peer_count = 0;
@@ -1172,6 +1173,10 @@ int junknas_config_load(junknas_config_t *config, const char *config_file) {
         if (cJSON_IsNumber(mtu)) {
             config->wg.mtu = mtu->valueint;
         }
+        cJSON *peer_keepalive = cJSON_GetObjectItemCaseSensitive(wg, "peer_keepalive");
+        if (cJSON_IsNumber(peer_keepalive) && peer_keepalive->valuedouble >= 0) {
+            config->wg_peer_keepalive = (uint16_t)peer_keepalive->valuedouble;
+        }
     }
 
     /* bootstrap_peers array */
@@ -1305,6 +1310,7 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
     cJSON_AddStringToObject(wg, "endpoint", config->wg.endpoint);
     cJSON_AddNumberToObject(wg, "listen_port", (double)config->wg.listen_port);
     cJSON_AddNumberToObject(wg, "mtu", (double)config->wg.mtu);
+    cJSON_AddNumberToObject(wg, "peer_keepalive", (double)config->wg_peer_keepalive);
 
     /* bootstrap peers */
     cJSON *arr = cJSON_CreateArray();

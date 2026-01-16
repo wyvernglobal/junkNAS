@@ -24,6 +24,7 @@
 #define DEFAULT_WG_PORT         51820
 #define DEFAULT_WG_INTERFACE    "jnk0"
 #define DEFAULT_STORAGE_SIZE    "10G"
+#define DEFAULT_WG_KEEPALIVE    25
 
 /* Maximum lengths for various strings */
 #define MAX_PATH_LEN            4096
@@ -103,6 +104,7 @@ typedef struct {
     int wg_peer_count;
     uint64_t wg_peers_updated_at;
     int wg_peer_status[MAX_WG_PEERS];  /* 1=connected, 0=unreachable, -1=connecting */
+    uint16_t wg_peer_keepalive;        /* Default persistent keepalive for WG peers */
 
     /* Mesh data mount points (for cross-node discovery) */
     char data_mount_points[MAX_DATA_MOUNT_POINTS][MAX_PATH_LEN];
