@@ -1,32 +1,32 @@
 {
-  "storage_size": "1G",
-  "data_dir": "/tmp/junknas-data",
-  "mount_point": "/tmp/junknas-mount",
-  "web_port": 9090,
-  "verbose": true,
-  "enable_fuse": true,
-  "daemon_mode": false,
-
-  "wireguard": {
-    "interface_name": "jnk0",
-    "wg_ip": "10.99.0.42",
-    "endpoint": "example.com:51820",
-    "listen_port": 51820,
-    "mtu": 1420
-  },
-
-  "bootstrap_peers": [
-    "10.0.0.1:9090",
-    "example.com:9090"
-  ],
-
-  "wg_peers": [
-    {
-      "public_key": "BASE64_PUBLIC_KEY_HERE",
-      "endpoint": "10.0.0.1:51820",
-      "wg_ip": "10.99.0.2",
-      "persistent_keepalive": 25,
-      "web_port": 9090
-    }
-  ]
+	"storage_size":	"1G",
+	"data_dir":	"/tmp/junknas-data",
+	"data_dirs":	["/tmp/junknas-data"],
+	"mount_point":	"/tmp/junknas-mount",
+	"web_port":	9090,
+	"verbose":	true,
+	"enable_fuse":	true,
+	"daemon_mode":	false,
+	"wireguard":	{
+		"interface_name":	"jnk0",
+		"private_key":	"KH6fV9tvASUiok1TKhsJ6mxGuxdiZjpOyz9JolkFQGQ=",
+		"public_key":	"hrRYFKFlVm5cfyJDOuNy7PrXGwqw0kuCx1ar1+lbykc=",
+		"wg_ip":	"10.99.0.42",
+		"endpoint":	"example.com:51820",
+		"listen_port":	51820,
+		"mtu":	1420
+	},
+	"bootstrap_peers":	["10.0.0.1:9090", "example.com:9090"],
+	"bootstrap_peers_updated_at":	0,
+	"data_mount_points":	[],
+	"data_mount_points_updated_at":	0,
+	"wg_peers":	[{
+			"public_key":	"BASE64_PUBLIC_KEY_HERE",
+			"preshared_key":	"",
+			"endpoint":	"10.0.0.1:51820",
+			"wg_ip":	"10.99.0.2",
+			"persistent_keepalive":	25,
+			"web_port":	9090
+		}],
+	"wg_peers_updated_at":	0
 }
