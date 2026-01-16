@@ -536,6 +536,9 @@ static int build_config_file_path(const char *config_file, char *out, size_t out
         if (slash) {
             return snprintf(out, out_len, "%s", config_file) >= (int)out_len ? -1 : 0;
         }
+        if (config_file[0] != '\0' && access(config_file, R_OK) == 0) {
+            return snprintf(out, out_len, "%s", config_file) >= (int)out_len ? -1 : 0;
+        }
         base = config_file;
     }
     if (!base || base[0] == '\0') {
