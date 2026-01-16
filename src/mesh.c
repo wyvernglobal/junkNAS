@@ -63,8 +63,8 @@ struct junknas_mesh {
 };
 
 static int mesh_apply_wireguard(struct junknas_mesh *mesh);
-static char *http_request_body(const char *host, uint16_t port, const char *request,
-                               const char *body, size_t body_len, int *out_status);
+static char *http_request_body(const junknas_config_t *config, const char *host, uint16_t port,
+                               const char *request, const char *body, size_t body_len, int *out_status);
 
 static void mesh_record_peer_stats(struct junknas_mesh *mesh, const wg_peer *peer) {
     if (!mesh || !peer) return;
@@ -150,6 +150,14 @@ static void mesh_log_peer_packets(struct junknas_mesh *mesh) {
                              (unsigned long long)rx_delta,
                              public_key,
                              (unsigned long long)peer->rx_bytes);
+        }
+
+        if (tx_delta > 0) {
+            mesh_log_verbose(mesh->config,
+                             "mesh: sent %llu bytes to %s (total tx=%llu)",
+                             (unsigned long long)tx_delta,
+                             public_key,
+                             (unsigned long long)peer->tx_bytes);
         }
 
         mesh_record_peer_stats(mesh, peer);
@@ -429,7 +437,7 @@ static int resolve_addr(const char *host, uint16_t port, int socktype,
     return 0;
 }
 
-static int fetch_public_ip(char *out, size_t out_len) {
+static int fetch_public_ip(const junknas_config_t *config, char *out, size_t out_len) {
     if (!out || out_len == 0) return -1;
     out[0] = '\0';
 
@@ -441,7 +449,7 @@ static int fetch_public_ip(char *out, size_t out_len) {
              path, host);
 
     int status = 0;
-    char *body = http_request_body(host, 80, request, NULL, 0, &status);
+    char *body = http_request_body(config, host, 80, request, NULL, 0, &status);
     if (!body) return -1;
 
     int rc = -1;
@@ -470,7 +478,9 @@ static int mesh_refresh_public_endpoint(struct junknas_mesh *mesh, int force) {
     if (strcmp(mesh->config->node_state, NODE_STATE_END) == 0) return 0;
 
     char public_ip[64];
-    if (fetch_public_ip(public_ip, sizeof(public_ip)) != 0) {
+    mesh_log_verbose(mesh->config, "mesh: refreshing public endpoint (force=%d)", force);
+    if (fetch_public_ip(mesh->config, public_ip, sizeof(public_ip)) != 0) {
+        mesh_log_verbose(mesh->config, "mesh: failed to fetch public IP");
         return -1;
     }
 
@@ -493,10 +503,18 @@ static int mesh_refresh_public_endpoint(struct junknas_mesh *mesh, int force) {
         changed = 1;
     }
 
+    char endpoint_snapshot[MAX_ENDPOINT_LEN];
+    snprintf(endpoint_snapshot, sizeof(endpoint_snapshot), "%s", mesh->config->wg.endpoint);
     if (strncmp(mesh->last_public_ip, public_ip, sizeof(mesh->last_public_ip)) != 0) {
         snprintf(mesh->last_public_ip, sizeof(mesh->last_public_ip), "%s", public_ip);
     }
     junknas_config_unlock(mesh->config);
+
+    if (changed) {
+        mesh_log_verbose(mesh->config, "mesh: public endpoint updated to %s", endpoint_snapshot);
+    } else {
+        mesh_log_verbose(mesh->config, "mesh: public endpoint unchanged (%s)", endpoint_snapshot);
+    }
 
     if (changed) {
         junknas_config_lock(mesh->config);
@@ -507,26 +525,38 @@ static int mesh_refresh_public_endpoint(struct junknas_mesh *mesh, int force) {
     return changed;
 }
 
-static char *http_request_body(const char *host, uint16_t port, const char *request,
-                               const char *body, size_t body_len, int *out_status) {
+static char *http_request_body(const junknas_config_t *config, const char *host, uint16_t port,
+                               const char *request, const char *body, size_t body_len, int *out_status) {
     struct sockaddr_storage addr;
     socklen_t addr_len = 0;
-    if (resolve_addr(host, port, SOCK_STREAM, &addr, &addr_len) != 0) return NULL;
+    if (resolve_addr(host, port, SOCK_STREAM, &addr, &addr_len) != 0) {
+        mesh_log_verbose(config, "mesh: http resolve failed for %s:%u", host, port);
+        return NULL;
+    }
 
     int fd = socket(addr.ss_family, SOCK_STREAM, 0);
-    if (fd < 0) return NULL;
+    if (fd < 0) {
+        mesh_log_verbose(config, "mesh: http socket create failed for %s:%u", host, port);
+        return NULL;
+    }
 
     if (connect(fd, (struct sockaddr *)&addr, addr_len) != 0) {
+        mesh_log_verbose(config, "mesh: http connect failed for %s:%u", host, port);
         close(fd);
         return NULL;
     }
 
-    if (send(fd, request, strlen(request), 0) < 0) {
+    size_t request_len = strlen(request);
+    mesh_log_verbose(config, "mesh: http send request %s:%u (%zu bytes)", host, port, request_len);
+    if (send(fd, request, request_len, 0) < 0) {
+        mesh_log_verbose(config, "mesh: http send request failed for %s:%u", host, port);
         close(fd);
         return NULL;
     }
     if (body && body_len > 0) {
+        mesh_log_verbose(config, "mesh: http send body %s:%u (%zu bytes)", host, port, body_len);
         if (send(fd, body, body_len, 0) < 0) {
+            mesh_log_verbose(config, "mesh: http send body failed for %s:%u", host, port);
             close(fd);
             return NULL;
         }
@@ -543,6 +573,7 @@ static char *http_request_body(const char *host, uint16_t port, const char *requ
     while (1) {
         ssize_t n = recv(fd, buf, sizeof(buf), 0);
         if (n <= 0) break;
+        mesh_log_verbose(config, "mesh: http recv chunk %s:%u (%zd bytes)", host, port, n);
 
         if (!header_done) {
             size_t to_copy = (size_t)n;
@@ -596,6 +627,8 @@ static char *http_request_body(const char *host, uint16_t port, const char *requ
     if (!out) {
         out = calloc(1, 1);
     }
+    mesh_log_verbose(config, "mesh: http response %s:%u status=%d body=%zu bytes",
+                     host, port, status, out_len);
     return out;
 }
 
@@ -856,23 +889,35 @@ static char *mesh_build_sync_payload(junknas_config_t *config) {
 static int mesh_sync_with_peer(struct junknas_mesh *mesh, const char *endpoint) {
     char host[MAX_ENDPOINT_LEN];
     uint16_t port = 0;
-    if (parse_endpoint(endpoint, host, sizeof(host), &port) != 0) return -1;
+    if (parse_endpoint(endpoint, host, sizeof(host), &port) != 0) {
+        mesh_log_verbose(mesh->config, "mesh: sync skipped (invalid endpoint %s)", endpoint ? endpoint : "(null)");
+        return -1;
+    }
+
+    mesh_log_verbose(mesh->config, "mesh: syncing with peer %s:%u", host, port);
 
     junknas_config_lock(mesh->config);
     char *payload = mesh_build_sync_payload(mesh->config);
     junknas_config_unlock(mesh->config);
-    if (!payload) return -1;
+    if (!payload) {
+        mesh_log_verbose(mesh->config, "mesh: failed to build sync payload for %s:%u", host, port);
+        return -1;
+    }
 
     char request[512];
     size_t payload_len = strlen(payload);
+    mesh_log_verbose(mesh->config, "mesh: sync payload %s:%u (%zu bytes)", host, port, payload_len);
     snprintf(request, sizeof(request),
              "POST /mesh/peers HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n",
              host, payload_len);
 
     int status = 0;
-    char *body = http_request_body(host, port, request, payload, payload_len, &status);
+    char *body = http_request_body(mesh->config, host, port, request, payload, payload_len, &status);
     free(payload);
-    if (!body) return -1;
+    if (!body) {
+        mesh_log_verbose(mesh->config, "mesh: sync failed (no response) from %s:%u", host, port);
+        return -1;
+    }
 
     int changed = 0;
     int ok = (status >= 200 && status < 300);
@@ -882,6 +927,8 @@ static int mesh_sync_with_peer(struct junknas_mesh *mesh, const char *endpoint) 
         }
         mesh_mark_active(mesh);
     }
+    mesh_log_verbose(mesh->config, "mesh: sync response %s:%u status=%d body=%zu bytes changed=%d",
+                     host, port, status, strlen(body), changed);
     free(body);
 
     if (changed > 0) {
@@ -926,6 +973,20 @@ static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
     snprintf(private_key_b64, sizeof(private_key_b64), "%s", mesh->config->wg.private_key);
     uint16_t listen_port = mesh->config->wg.listen_port;
     junknas_config_unlock(mesh->config);
+
+    mesh_log_verbose(mesh->config,
+                     "mesh: applying WireGuard config iface=%s listen_port=%u peers=%d",
+                     iface, listen_port, peer_count);
+    for (int i = 0; i < peer_count; i++) {
+        mesh_log_verbose(mesh->config,
+                         "mesh: peer[%d] pub=%s wg_ip=%s endpoint=%s keepalive=%u web_port=%u",
+                         i,
+                         peers[i].public_key,
+                         peers[i].wg_ip,
+                         peers[i].endpoint[0] ? peers[i].endpoint : "(none)",
+                         peers[i].persistent_keepalive,
+                         peers[i].web_port);
+    }
 
     wg_device *existing = NULL;
     if (wg_get_device(&existing, iface) != 0) {
@@ -998,6 +1059,7 @@ static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
 
     int rc = wg_set_device(&dev);
     mesh_free_wg_peers(first_peer);
+    mesh_log_verbose(mesh->config, "mesh: wg_set_device %s (rc=%d)", rc == 0 ? "ok" : "failed", rc);
     return rc == 0 ? 0 : -1;
 }
 
@@ -1122,6 +1184,7 @@ static void *mesh_listener_thread(void *arg) {
     while (!mesh->stop) {
         int did_sync = 0;
         time_t now = time(NULL);
+        mesh_log_verbose(mesh->config, "mesh: sync tick start (ts=%ld)", (long)now);
         if (mesh->last_public_ip_check == 0 || now - mesh->last_public_ip_check >= 60) {
             mesh->last_public_ip_check = now;
             if (mesh_refresh_public_endpoint(mesh, 0) > 0) {
@@ -1144,18 +1207,25 @@ static void *mesh_listener_thread(void *arg) {
             wg_peers[i] = mesh->config->wg_peers[i];
         }
         junknas_config_unlock(mesh->config);
+        mesh_log_verbose(mesh->config, "mesh: tick peers bootstrap=%d wg=%d", peer_count, wg_peer_count);
 
         if (peers_updated_at != mesh->last_applied_peers_updated_at) {
+            mesh_log_verbose(mesh->config, "mesh: peer config changed (applying)");
             if (mesh_apply_wireguard(mesh) == 0) {
                 mesh->last_applied_peers_updated_at = peers_updated_at;
+                mesh_log_verbose(mesh->config, "mesh: WireGuard config applied");
+            } else {
+                mesh_log_verbose(mesh->config, "mesh: WireGuard config apply failed");
             }
         }
 
         for (int i = 0; i < peer_count; i++) {
+            mesh_log_verbose(mesh->config, "mesh: syncing bootstrap peer %s", peers[i]);
             int rc = mesh_sync_with_peer(mesh, peers[i]);
             junknas_config_lock(mesh->config);
             mesh->config->bootstrap_peer_status[i] = (rc == 0) ? 1 : 0;
             junknas_config_unlock(mesh->config);
+            mesh_log_verbose(mesh->config, "mesh: bootstrap peer %s sync %s", peers[i], rc == 0 ? "ok" : "failed");
             if (rc == 0) did_sync = 1;
         }
 
@@ -1163,10 +1233,12 @@ static void *mesh_listener_thread(void *arg) {
             uint16_t web_port = wg_peers[i].web_port ? wg_peers[i].web_port : default_web_port;
             char endpoint[MAX_ENDPOINT_LEN];
             snprintf(endpoint, sizeof(endpoint), "%s:%u", wg_peers[i].wg_ip, web_port);
+            mesh_log_verbose(mesh->config, "mesh: syncing wireguard peer %s", endpoint);
             int rc = mesh_sync_with_peer(mesh, endpoint);
             junknas_config_lock(mesh->config);
             mesh->config->wg_peer_status[i] = (rc == 0) ? 1 : -1;
             junknas_config_unlock(mesh->config);
+            mesh_log_verbose(mesh->config, "mesh: wireguard peer %s sync %s", endpoint, rc == 0 ? "ok" : "failed");
             if (rc == 0) did_sync = 1;
         }
 
@@ -1185,27 +1257,39 @@ static void *mesh_listener_thread(void *arg) {
     return NULL;
 }
 
-static int http_request(const char *host, uint16_t port, const char *request,
-                        const uint8_t *body, size_t body_len,
+static int http_request(const junknas_config_t *config, const char *host, uint16_t port,
+                        const char *request, const uint8_t *body, size_t body_len,
                         FILE *out, int *out_status) {
     struct sockaddr_storage addr;
     socklen_t addr_len = 0;
-    if (resolve_addr(host, port, SOCK_STREAM, &addr, &addr_len) != 0) return -1;
+    if (resolve_addr(host, port, SOCK_STREAM, &addr, &addr_len) != 0) {
+        mesh_log_verbose(config, "mesh: http resolve failed for %s:%u", host, port);
+        return -1;
+    }
 
     int fd = socket(addr.ss_family, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    if (fd < 0) {
+        mesh_log_verbose(config, "mesh: http socket create failed for %s:%u", host, port);
+        return -1;
+    }
 
     if (connect(fd, (struct sockaddr *)&addr, addr_len) != 0) {
+        mesh_log_verbose(config, "mesh: http connect failed for %s:%u", host, port);
         close(fd);
         return -1;
     }
 
-    if (send(fd, request, strlen(request), 0) < 0) {
+    size_t request_len = strlen(request);
+    mesh_log_verbose(config, "mesh: http send request %s:%u (%zu bytes)", host, port, request_len);
+    if (send(fd, request, request_len, 0) < 0) {
+        mesh_log_verbose(config, "mesh: http send request failed for %s:%u", host, port);
         close(fd);
         return -1;
     }
     if (body && body_len > 0) {
+        mesh_log_verbose(config, "mesh: http send body %s:%u (%zu bytes)", host, port, body_len);
         if (send(fd, body, body_len, 0) < 0) {
+            mesh_log_verbose(config, "mesh: http send body failed for %s:%u", host, port);
             close(fd);
             return -1;
         }
@@ -1219,6 +1303,7 @@ static int http_request(const char *host, uint16_t port, const char *request,
     while (1) {
         ssize_t n = recv(fd, buf, sizeof(buf), 0);
         if (n <= 0) break;
+        mesh_log_verbose(config, "mesh: http recv chunk %s:%u (%zd bytes)", host, port, n);
 
         if (!header_done) {
             size_t to_copy = (size_t)n;
@@ -1259,12 +1344,14 @@ static int http_request(const char *host, uint16_t port, const char *request,
 
     close(fd);
     if (out_status) *out_status = status;
+    mesh_log_verbose(config, "mesh: http response %s:%u status=%d", host, port, status);
     return (status >= 200 && status < 300) ? 0 : -1;
 }
 
 int junknas_mesh_fetch_chunk(junknas_mesh_t *mesh, const char *hashhex, const char *dest_path) {
     if (!mesh || !hashhex || !dest_path) return -1;
     if (!junknas_mesh_is_active(mesh)) return -1;
+    mesh_log_verbose(mesh->config, "mesh: fetch chunk %s -> %s", hashhex, dest_path);
 
     junknas_config_lock(mesh->config);
     mesh_peer_t peers[MESH_MAX_PEERS];
@@ -1286,15 +1373,21 @@ int junknas_mesh_fetch_chunk(junknas_mesh_t *mesh, const char *hashhex, const ch
         FILE *out = fopen(dest_path, "wb");
         if (!out) continue;
         int status = 0;
-        int rc = http_request(peers[i].wg_ip, peers[i].web_port, request, NULL, 0, out, &status);
+        mesh_log_verbose(mesh->config, "mesh: fetching chunk %s from %s:%u",
+                         hashhex, peers[i].wg_ip, peers[i].web_port);
+        int rc = http_request(mesh->config, peers[i].wg_ip, peers[i].web_port,
+                              request, NULL, 0, out, &status);
         fclose(out);
 
         if (rc == 0) {
+            mesh_log_verbose(mesh->config, "mesh: fetch chunk %s succeeded via %s:%u",
+                             hashhex, peers[i].wg_ip, peers[i].web_port);
             return 0;
         }
         (void)unlink(dest_path);
     }
 
+    mesh_log_verbose(mesh->config, "mesh: fetch chunk %s failed on all peers", hashhex);
     return -1;
 }
 
@@ -1304,6 +1397,7 @@ int junknas_mesh_replicate_chunk(junknas_mesh_t *mesh,
                                 size_t len) {
     if (!mesh || !hashhex || !data || len == 0) return -1;
     if (!junknas_mesh_is_active(mesh)) return -1;
+    mesh_log_verbose(mesh->config, "mesh: replicate chunk %s (%zu bytes)", hashhex, len);
 
     junknas_config_lock(mesh->config);
     mesh_peer_t peers[MESH_MAX_PEERS];
@@ -1321,9 +1415,13 @@ int junknas_mesh_replicate_chunk(junknas_mesh_t *mesh,
         snprintf(request, sizeof(request),
                  "POST /chunks/%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n",
                  hashhex, peers[i].wg_ip, len);
-        (void)http_request(peers[i].wg_ip, peers[i].web_port, request, data, len, NULL, NULL);
+        mesh_log_verbose(mesh->config, "mesh: replicating chunk %s -> %s:%u",
+                         hashhex, peers[i].wg_ip, peers[i].web_port);
+        (void)http_request(mesh->config, peers[i].wg_ip, peers[i].web_port,
+                           request, data, len, NULL, NULL);
     }
 
+    mesh_log_verbose(mesh->config, "mesh: replicate chunk %s done", hashhex);
     return 0;
 }
 
