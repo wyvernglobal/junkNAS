@@ -1,32 +1,19 @@
 {
-	"storage_size":	"1G",
-	"data_dir":	"$HOME/.local/share/junknas/data",
-	"data_dirs":	["$HOME/.local/share/junknas/data"],
-	"mount_point":	"/mnt/junknas",
-	"web_port":	9090,
-	"node_state":	"node",
-	"verbose":	true,
-	"enable_fuse":	true,
-	"daemon_mode":	false,
-	"wireguard":	{
-		"interface_name":	"jnk0",
-		"private_key":	"",
-		"public_key":	"",
-		"wg_ip":	"10.99.0.42",
-		"endpoint":	"example.com:51820",
-		"listen_port":	51820,
-		"mtu":	1420
-	},
-	"bootstrap_peers":	["10.0.0.1:9090", "example.com:9090"],
-	"bootstrap_peers_updated_at":	0,
-	"data_mount_points":	[],
-	"data_mount_points_updated_at":	0,
-	"wg_peers":	[{
-			"public_key":	"BASE64_PUBLIC_KEY_HERE",
-			"endpoint":	"10.0.0.1:51820",
-			"wg_ip":	"10.99.0.2",
-			"persistent_keepalive":	25,
-			"web_port":	9090
-		}],
-	"wg_peers_updated_at":	0
+  "storage_size": "1G",
+  "data_dirs": [
+    "$HOME/.local/share/junknas/data"
+  ],
+  "mount_point": "/mnt/junknas",
+  "web_port": 9090,
+  "node_state": "node",
+  "verbose": true,
+  "enable_fuse": true,
+  "daemon_mode": false,
+  "bootstrap_peers": [
+    "192.168.1.10:9090",
+    "192.168.1.11:9090"
+  ],
+  "bootstrap_peers_updated_at": 0,
+  "data_mount_points": [],
+  "data_mount_points_updated_at": 0
 }
