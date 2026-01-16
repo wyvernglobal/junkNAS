@@ -680,10 +680,16 @@ static void set_defaults(junknas_config_t *config) {
     /* Bootstrap list */
     config->bootstrap_peer_count = 0;
     config->bootstrap_peers_updated_at = 0;
+    for (int i = 0; i < MAX_BOOTSTRAP_PEERS; i++) {
+        config->bootstrap_peer_status[i] = -1;
+    }
 
     /* WireGuard peers */
     config->wg_peer_count = 0;
     config->wg_peers_updated_at = 0;
+    for (int i = 0; i < MAX_WG_PEERS; i++) {
+        config->wg_peer_status[i] = -1;
+    }
 
     /* Mesh mount points */
     config->data_mount_point_count = 0;
