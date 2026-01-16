@@ -1,5 +1,5 @@
 /*
- * junkNAS - WireGuard mesh coordination + chunk replication helpers
+ * junkNAS - mesh coordination + chunk replication helpers
  */
 
 #include "mesh.h"
@@ -23,7 +23,6 @@
 
 #include <cjson/cJSON.h>
 
-#include "wireguard.h"
 
 #define MESH_MAX_PEERS   MAX_WG_PEERS
 #define MESH_CONNECT_TIMEOUT_SEC 1
@@ -38,11 +37,6 @@ static void mesh_log_verbose(const junknas_config_t *config, const char *fmt, ..
     va_end(args);
 }
 
-typedef struct {
-    char wg_ip[16];
-    uint16_t web_port;
-} mesh_peer_t;
-
 struct junknas_mesh {
     junknas_config_t *config;
     pthread_t listener;
@@ -53,269 +47,10 @@ struct junknas_mesh {
     uint64_t last_applied_peers_updated_at;
     time_t last_public_ip_check;
     char last_public_ip[64];
-    struct {
-        char public_key[MAX_WG_KEY_LEN];
-        uint64_t last_rx_bytes;
-        uint64_t last_tx_bytes;
-        int handshake_confirmed;
-    } peer_stats[MESH_MAX_PEERS];
-    int peer_stats_count;
 };
 
-static int mesh_apply_wireguard(struct junknas_mesh *mesh);
 static char *http_request_body(const junknas_config_t *config, const char *host, uint16_t port,
                                const char *request, const char *body, size_t body_len, int *out_status);
-
-static void mesh_record_peer_stats(struct junknas_mesh *mesh, const wg_peer *peer) {
-    if (!mesh || !peer) return;
-
-    wg_key_b64_string public_key;
-    wg_key_to_base64(public_key, peer->public_key);
-
-    int idx = -1;
-    for (int i = 0; i < mesh->peer_stats_count; i++) {
-        if (strcmp(mesh->peer_stats[i].public_key, public_key) == 0) {
-            idx = i;
-            break;
-        }
-    }
-
-    if (idx < 0) {
-        if (mesh->peer_stats_count >= MESH_MAX_PEERS) {
-            return;
-        }
-        idx = mesh->peer_stats_count++;
-        memset(&mesh->peer_stats[idx], 0, sizeof(mesh->peer_stats[idx]));
-        snprintf(mesh->peer_stats[idx].public_key, sizeof(mesh->peer_stats[idx].public_key), "%s", public_key);
-    }
-
-    mesh->peer_stats[idx].last_rx_bytes = peer->rx_bytes;
-    mesh->peer_stats[idx].last_tx_bytes = peer->tx_bytes;
-    mesh->peer_stats[idx].handshake_confirmed = (peer->last_handshake_time.tv_sec != 0);
-}
-
-static void mesh_log_peer_packets(struct junknas_mesh *mesh) {
-    if (!mesh || !mesh->config || !mesh->config->verbose) return;
-
-    char iface[32];
-    junknas_config_lock(mesh->config);
-    snprintf(iface, sizeof(iface), "%s", mesh->config->wg.interface_name);
-    junknas_config_unlock(mesh->config);
-
-    wg_device *dev = NULL;
-    if (wg_get_device(&dev, iface) != 0 || !dev) return;
-
-    for (wg_peer *peer = dev->first_peer; peer; peer = peer->next_peer) {
-        wg_key_b64_string public_key;
-        wg_key_to_base64(public_key, peer->public_key);
-
-        int idx = -1;
-        for (int i = 0; i < mesh->peer_stats_count; i++) {
-            if (strcmp(mesh->peer_stats[i].public_key, public_key) == 0) {
-                idx = i;
-                break;
-            }
-        }
-
-        uint64_t last_rx = 0;
-        uint64_t last_tx = 0;
-        int handshake_confirmed = 0;
-        if (idx >= 0) {
-            last_rx = mesh->peer_stats[idx].last_rx_bytes;
-            last_tx = mesh->peer_stats[idx].last_tx_bytes;
-            handshake_confirmed = mesh->peer_stats[idx].handshake_confirmed;
-        }
-
-        uint64_t rx_delta = (peer->rx_bytes >= last_rx) ? (peer->rx_bytes - last_rx) : peer->rx_bytes;
-        uint64_t tx_delta = (peer->tx_bytes >= last_tx) ? (peer->tx_bytes - last_tx) : peer->tx_bytes;
-        int handshake_now = (peer->last_handshake_time.tv_sec != 0);
-
-        if (!handshake_now && (rx_delta > 0 || tx_delta > 0)) {
-            mesh_log_verbose(mesh->config,
-                             "mesh: handshake pending for %s (tx=%llu +%llu, rx=%llu +%llu)",
-                             public_key,
-                             (unsigned long long)peer->tx_bytes,
-                             (unsigned long long)tx_delta,
-                             (unsigned long long)peer->rx_bytes,
-                             (unsigned long long)rx_delta);
-        }
-
-        if (handshake_now && !handshake_confirmed) {
-            mesh_log_verbose(mesh->config, "mesh: handshake confirmed for %s", public_key);
-        }
-
-        if (rx_delta > 0) {
-            mesh_log_verbose(mesh->config,
-                             "mesh: received %llu bytes from %s (total rx=%llu)",
-                             (unsigned long long)rx_delta,
-                             public_key,
-                             (unsigned long long)peer->rx_bytes);
-        }
-
-        if (tx_delta > 0) {
-            mesh_log_verbose(mesh->config,
-                             "mesh: sent %llu bytes to %s (total tx=%llu)",
-                             (unsigned long long)tx_delta,
-                             public_key,
-                             (unsigned long long)peer->tx_bytes);
-        }
-
-        mesh_record_peer_stats(mesh, peer);
-    }
-
-    wg_free_device(dev);
-}
-
-static void mesh_update_wg_peer_status(struct junknas_mesh *mesh) {
-    if (!mesh || !mesh->config) return;
-
-    char iface[32];
-    char public_keys[MESH_MAX_PEERS][MAX_WG_KEY_LEN];
-    int peer_count = 0;
-
-    junknas_config_lock(mesh->config);
-    snprintf(iface, sizeof(iface), "%s", mesh->config->wg.interface_name);
-    peer_count = mesh->config->wg_peer_count;
-    if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
-    for (int i = 0; i < peer_count; i++) {
-        snprintf(public_keys[i], sizeof(public_keys[i]), "%s", mesh->config->wg_peers[i].public_key);
-    }
-    junknas_config_unlock(mesh->config);
-
-    wg_device *dev = NULL;
-    if (wg_get_device(&dev, iface) != 0 || !dev) return;
-
-    int statuses[MESH_MAX_PEERS];
-    for (int i = 0; i < peer_count; i++) {
-        statuses[i] = -1;
-    }
-
-    for (wg_peer *peer = dev->first_peer; peer; peer = peer->next_peer) {
-        wg_key_b64_string public_key;
-        wg_key_to_base64(public_key, peer->public_key);
-        for (int i = 0; i < peer_count; i++) {
-            if (strcmp(public_keys[i], public_key) == 0) {
-                if (peer->last_handshake_time.tv_sec != 0) {
-                    statuses[i] = 1;
-                }
-                break;
-            }
-        }
-    }
-
-    junknas_config_lock(mesh->config);
-    for (int i = 0; i < peer_count; i++) {
-        mesh->config->wg_peer_status[i] = statuses[i];
-    }
-    junknas_config_unlock(mesh->config);
-
-    wg_free_device(dev);
-}
-
-static int read_entire_file(const char *path, char **out_buf, size_t *out_len) {
-    FILE *f = NULL;
-    char *buf = NULL;
-    long sz = 0;
-
-    if (!path || !out_buf) return -1;
-    *out_buf = NULL;
-    if (out_len) *out_len = 0;
-
-    f = fopen(path, "rb");
-    if (!f) return -1;
-
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return -1;
-    }
-
-    sz = ftell(f);
-    if (sz < 0) {
-        fclose(f);
-        return -1;
-    }
-
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return -1;
-    }
-
-    buf = malloc((size_t)sz + 1);
-    if (!buf) {
-        fclose(f);
-        return -1;
-    }
-
-    if (sz > 0) {
-        size_t got = fread(buf, 1, (size_t)sz, f);
-        if (got != (size_t)sz) {
-            free(buf);
-            fclose(f);
-            return -1;
-        }
-    }
-
-    buf[(size_t)sz] = '\0';
-    fclose(f);
-
-    *out_buf = buf;
-    if (out_len) *out_len = (size_t)sz;
-    return 0;
-}
-
-static int write_entire_file_atomic(const char *path, const char *data) {
-    if (!path || !data) return -1;
-
-    char tmp_path[MAX_PATH_LEN];
-    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path) >= (int)sizeof(tmp_path)) {
-        return -1;
-    }
-
-    FILE *f = fopen(tmp_path, "wb");
-    if (!f) return -1;
-
-    size_t len = strlen(data);
-    if (len > 0) {
-        if (fwrite(data, 1, len, f) != len) {
-            fclose(f);
-            (void)remove(tmp_path);
-            return -1;
-        }
-    }
-
-    if (fflush(f) != 0) {
-        fclose(f);
-        (void)remove(tmp_path);
-        return -1;
-    }
-
-    fclose(f);
-
-    if (rename(tmp_path, path) != 0) {
-        (void)remove(tmp_path);
-        return -1;
-    }
-
-    return 0;
-}
-
-static int normalize_key_string(const char *input, char *out, size_t out_len) {
-    if (!input || !out || out_len == 0) return -1;
-
-    while (*input && isspace((unsigned char)*input)) {
-        input++;
-    }
-
-    size_t len = strlen(input);
-    while (len > 0 && isspace((unsigned char)input[len - 1])) {
-        len--;
-    }
-
-    if (len == 0 || len >= out_len) return -1;
-    memcpy(out, input, len);
-    out[len] = '\0';
-    return 0;
-}
 
 static int ensure_config_dir(void) {
     char config_dir[MAX_PATH_LEN];
@@ -410,6 +145,21 @@ static int parse_endpoint(const char *endpoint, char *host, size_t host_len, uin
     return 0;
 }
 
+static int mesh_peer_hostport(const junknas_wg_peer_t *peer,
+                              uint16_t default_web_port,
+                              char *host,
+                              size_t host_len,
+                              uint16_t *port) {
+    if (!peer || !host || !port) return -1;
+    if (peer->endpoint[0] != '\0') {
+        return parse_endpoint(peer->endpoint, host, host_len, port);
+    }
+    if (peer->wg_ip[0] == '\0') return -1;
+    snprintf(host, host_len, "%s", peer->wg_ip);
+    *port = peer->web_port ? peer->web_port : default_web_port;
+    return 0;
+}
+
 static int is_ipv4_address(const char *text) {
     if (!text || text[0] == '\0') return 0;
     struct in_addr addr;
@@ -473,7 +223,7 @@ static int fetch_public_ip(const junknas_config_t *config, char *out, size_t out
     return rc;
 }
 
-static int mesh_refresh_public_endpoint(struct junknas_mesh *mesh, int force) {
+static __attribute__((unused)) int mesh_refresh_public_endpoint(struct junknas_mesh *mesh, int force) {
     if (!mesh || !mesh->config) return -1;
     if (strcmp(mesh->config->node_state, NODE_STATE_END) == 0) return 0;
 
@@ -699,15 +449,15 @@ static int mesh_peer_from_json(cJSON *obj, junknas_wg_peer_t *peer) {
         out.web_port = (uint16_t)web_port->valuedouble;
     }
 
-    if (out.public_key[0] == '\0' || out.wg_ip[0] == '\0') return -1;
+    if (out.endpoint[0] == '\0' && out.wg_ip[0] == '\0') return -1;
     *peer = out;
     return 0;
 }
 
 static int mesh_peer_equal(const junknas_wg_peer_t *a, const junknas_wg_peer_t *b) {
     if (!a || !b) return 0;
-    if (strcmp(a->public_key, b->public_key) != 0) return 0;
     if (strcmp(a->endpoint, b->endpoint) != 0) return 0;
+    if (strcmp(a->public_key, b->public_key) != 0) return 0;
     if (strcmp(a->wg_ip, b->wg_ip) != 0) return 0;
     if (a->persistent_keepalive != b->persistent_keepalive) return 0;
     if (a->web_port != b->web_port) return 0;
@@ -718,10 +468,7 @@ static cJSON *mesh_peer_to_json(const junknas_wg_peer_t *peer) {
     if (!peer) return NULL;
     cJSON *obj = cJSON_CreateObject();
     if (!obj) return NULL;
-    cJSON_AddStringToObject(obj, "public_key", peer->public_key);
     cJSON_AddStringToObject(obj, "endpoint", peer->endpoint);
-    cJSON_AddStringToObject(obj, "wg_ip", peer->wg_ip);
-    cJSON_AddNumberToObject(obj, "persistent_keepalive", (double)peer->persistent_keepalive);
     cJSON_AddNumberToObject(obj, "web_port", (double)peer->web_port);
     return obj;
 }
@@ -848,12 +595,8 @@ static char *mesh_build_sync_payload(junknas_config_t *config) {
             cJSON_Delete(root);
             return NULL;
         }
-        cJSON_AddStringToObject(self, "public_key", config->wg.public_key);
         cJSON_AddStringToObject(self, "endpoint", config->wg.endpoint);
-        cJSON_AddStringToObject(self, "wg_ip", config->wg.wg_ip);
         cJSON_AddNumberToObject(self, "web_port", (double)config->web_port);
-        cJSON_AddNumberToObject(self, "persistent_keepalive", 0);
-        cJSON_AddNumberToObject(self, "listen_port", (double)config->wg.listen_port);
         cJSON_AddItemToObject(root, "self", self);
 
         cJSON *peers = cJSON_CreateArray();
@@ -934,9 +677,6 @@ static int mesh_sync_with_peer(struct junknas_mesh *mesh, const char *endpoint) 
     if (changed > 0) {
         junknas_config_lock(mesh->config);
         (void)junknas_config_save(mesh->config, mesh->config->config_file_path);
-        junknas_config_unlock(mesh->config);
-        (void)mesh_apply_wireguard(mesh);
-        junknas_config_lock(mesh->config);
         mesh->last_applied_peers_updated_at = mesh->config->wg_peers_updated_at;
         junknas_config_unlock(mesh->config);
         mesh_mark_active(mesh);
@@ -945,231 +685,13 @@ static int mesh_sync_with_peer(struct junknas_mesh *mesh, const char *endpoint) 
     return ok ? 0 : -1;
 }
 
-static void mesh_free_wg_peers(wg_peer *peer) {
-    while (peer) {
-        wg_peer *next = peer->next_peer;
-        wg_allowedip *allowed = peer->first_allowedip;
-        while (allowed) {
-            wg_allowedip *next_allowed = allowed->next_allowedip;
-            free(allowed);
-            allowed = next_allowed;
-        }
-        free(peer);
-        peer = next;
-    }
+static __attribute__((unused)) int mesh_apply_wireguard(struct junknas_mesh *mesh) {
+    (void)mesh;
+    return 0;
 }
 
-static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
-    if (!mesh || !mesh->config) return -1;
-
-    junknas_config_lock(mesh->config);
-    junknas_wg_peer_t peers[MESH_MAX_PEERS];
-    int peer_count = mesh->config->wg_peer_count;
-    if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
-    memcpy(peers, mesh->config->wg_peers, sizeof(junknas_wg_peer_t) * (size_t)peer_count);
-    char iface[32];
-    snprintf(iface, sizeof(iface), "%s", mesh->config->wg.interface_name);
-    char private_key_b64[MAX_WG_KEY_LEN];
-    snprintf(private_key_b64, sizeof(private_key_b64), "%s", mesh->config->wg.private_key);
-    uint16_t listen_port = mesh->config->wg.listen_port;
-    uint16_t default_keepalive = mesh->config->wg_peer_keepalive;
-    junknas_config_unlock(mesh->config);
-
-    mesh_log_verbose(mesh->config,
-                     "mesh: applying WireGuard config iface=%s listen_port=%u peers=%d",
-                     iface, listen_port, peer_count);
-    for (int i = 0; i < peer_count; i++) {
-        mesh_log_verbose(mesh->config,
-                         "mesh: peer[%d] pub=%s wg_ip=%s endpoint=%s keepalive=%u web_port=%u",
-                         i,
-                         peers[i].public_key,
-                         peers[i].wg_ip,
-                         peers[i].endpoint[0] ? peers[i].endpoint : "(none)",
-                         peers[i].persistent_keepalive,
-                         peers[i].web_port);
-    }
-
-    wg_device *existing = NULL;
-    if (wg_get_device(&existing, iface) != 0) {
-        (void)wg_add_device(iface);
-    }
-    if (existing) wg_free_device(existing);
-
-    wg_device dev;
-    memset(&dev, 0, sizeof(dev));
-    snprintf(dev.name, sizeof(dev.name), "%s", iface);
-    dev.flags = WGDEVICE_HAS_PRIVATE_KEY | WGDEVICE_HAS_LISTEN_PORT | WGDEVICE_REPLACE_PEERS;
-    dev.listen_port = listen_port;
-
-    if (wg_key_from_base64(dev.private_key, private_key_b64) != 0) {
-        return -1;
-    }
-
-    wg_peer *first_peer = NULL;
-    wg_peer *last_peer = NULL;
-
-    for (int i = 0; i < peer_count; i++) {
-        wg_peer *peer = calloc(1, sizeof(*peer));
-        if (!peer) continue;
-
-        peer->flags = WGPEER_HAS_PUBLIC_KEY | WGPEER_REPLACE_ALLOWEDIPS;
-        if (wg_key_from_base64(peer->public_key, peers[i].public_key) != 0) {
-            free(peer);
-            continue;
-        }
-
-        uint16_t keepalive = peers[i].persistent_keepalive;
-        if (keepalive == 0) {
-            keepalive = default_keepalive;
-        }
-        if (keepalive > 0) {
-            peer->persistent_keepalive_interval = keepalive;
-            peer->flags |= WGPEER_HAS_PERSISTENT_KEEPALIVE_INTERVAL;
-        }
-
-        if (peers[i].endpoint[0] != '\0') {
-            char host[MAX_ENDPOINT_LEN];
-            uint16_t port = 0;
-            if (parse_endpoint(peers[i].endpoint, host, sizeof(host), &port) == 0) {
-                struct sockaddr_storage addr;
-                socklen_t addr_len = 0;
-                if (resolve_addr(host, port, SOCK_DGRAM, &addr, &addr_len) == 0) {
-                    memcpy(&peer->endpoint.addr, &addr, addr_len);
-                }
-            }
-        }
-
-        struct in_addr ip4;
-        if (inet_pton(AF_INET, peers[i].wg_ip, &ip4) == 1) {
-            wg_allowedip *allowed = calloc(1, sizeof(*allowed));
-            if (allowed) {
-                allowed->family = AF_INET;
-                allowed->ip4 = ip4;
-                allowed->cidr = 32;
-                peer->first_allowedip = allowed;
-                peer->last_allowedip = allowed;
-            }
-        }
-
-        if (!first_peer) {
-            first_peer = peer;
-        } else {
-            last_peer->next_peer = peer;
-        }
-        last_peer = peer;
-    }
-
-    dev.first_peer = first_peer;
-    dev.last_peer = last_peer;
-
-    int rc = wg_set_device(&dev);
-    mesh_free_wg_peers(first_peer);
-    mesh_log_verbose(mesh->config, "mesh: wg_set_device %s (rc=%d)", rc == 0 ? "ok" : "failed", rc);
-    return rc == 0 ? 0 : -1;
-}
-
-static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
-    if (!mesh || !mesh->config) return -1;
-
-    char private_key_path[MAX_PATH_LEN];
-    if (build_private_key_path(mesh->config, private_key_path, sizeof(private_key_path)) != 0) {
-        mesh_log_verbose(mesh->config, "mesh: failed to build WireGuard key path");
-        return -1;
-    }
-
-    mesh_log_verbose(mesh->config, "mesh: ensuring WireGuard keys in %s", private_key_path);
-    junknas_config_lock(mesh->config);
-
-    wg_key private_key;
-    wg_key public_key;
-    wg_key_b64_string pub_b64;
-    bool have_private = false;
-    bool changed = false;
-    bool should_write_private = false;
-    bool file_loaded = false;
-
-    char *file_contents = NULL;
-    if (read_entire_file(private_key_path, &file_contents, NULL) == 0) {
-        char normalized[MAX_WG_KEY_LEN];
-        if (normalize_key_string(file_contents, normalized, sizeof(normalized)) == 0 &&
-            wg_key_from_base64(private_key, normalized) == 0) {
-            if (strcmp(mesh->config->wg.private_key, normalized) != 0) {
-                snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s", normalized);
-                changed = true;
-            }
-            have_private = true;
-            file_loaded = true;
-            mesh_log_verbose(mesh->config, "mesh: loaded existing WireGuard private key");
-        }
-    } else {
-        mesh_log_verbose(mesh->config, "mesh: no private key file found at %s", private_key_path);
-    }
-    free(file_contents);
-    file_contents = NULL;
-
-    if (!have_private) {
-        if (mesh->config->wg.private_key[0] != '\0' &&
-            wg_key_from_base64(private_key, mesh->config->wg.private_key) == 0) {
-            have_private = true;
-        } else {
-            wg_key_b64_string priv_b64;
-            wg_generate_private_key(private_key);
-            wg_key_to_base64(priv_b64, private_key);
-            snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s", priv_b64);
-            changed = true;
-            have_private = true;
-            mesh_log_verbose(mesh->config, "mesh: generated new WireGuard private key");
-        }
-    }
-
-    if (!have_private) {
-        junknas_config_unlock(mesh->config);
-        mesh_log_verbose(mesh->config, "mesh: failed to obtain WireGuard private key");
-        return -1;
-    }
-
-    if (wg_key_from_base64(private_key, mesh->config->wg.private_key) != 0) {
-        junknas_config_unlock(mesh->config);
-        mesh_log_verbose(mesh->config, "mesh: WireGuard private key is invalid");
-        return -1;
-    }
-
-    wg_generate_public_key(public_key, private_key);
-    wg_key_to_base64(pub_b64, public_key);
-    if (strcmp(mesh->config->wg.public_key, pub_b64) != 0) {
-        snprintf(mesh->config->wg.public_key, sizeof(mesh->config->wg.public_key), "%s", pub_b64);
-        changed = true;
-        mesh_log_verbose(mesh->config, "mesh: updated WireGuard public key");
-    }
-
-    should_write_private = !file_loaded;
-    junknas_config_unlock(mesh->config);
-
-    if (should_write_private) {
-        if (ensure_parent_dir(private_key_path) != 0) {
-            char config_dir[MAX_PATH_LEN];
-            if (junknas_default_config_dir(config_dir, sizeof(config_dir)) != 0) {
-                mesh_log_verbose(mesh->config, "mesh: failed to ensure config dir (unable to resolve path)");
-            } else {
-                mesh_log_verbose(mesh->config, "mesh: failed to ensure config dir %s", config_dir);
-            }
-            return -1;
-        }
-        if (write_entire_file_atomic(private_key_path, mesh->config->wg.private_key) != 0) {
-            mesh_log_verbose(mesh->config,
-                             "mesh: failed to write private key to %s (continuing without key file)",
-                             private_key_path);
-        } else {
-            mesh_log_verbose(mesh->config, "mesh: wrote WireGuard private key to %s", private_key_path);
-        }
-    }
-
-    if (changed) {
-        mesh_log_verbose(mesh->config, "mesh: saving updated WireGuard keys to %s",
-                         mesh->config->config_file_path);
-        return junknas_config_save(mesh->config, mesh->config->config_file_path);
-    }
-
+static __attribute__((unused)) int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
+    (void)mesh;
     return 0;
 }
 
@@ -1190,13 +712,6 @@ static void *mesh_listener_thread(void *arg) {
         int did_sync = 0;
         time_t now = time(NULL);
         mesh_log_verbose(mesh->config, "mesh: sync tick start (ts=%ld)", (long)now);
-        if (mesh->last_public_ip_check == 0 || now - mesh->last_public_ip_check >= 60) {
-            mesh->last_public_ip_check = now;
-            if (mesh_refresh_public_endpoint(mesh, 0) > 0) {
-                did_sync = 1;
-            }
-        }
-
         junknas_config_lock(mesh->config);
         int peer_count = mesh->config->bootstrap_peer_count;
         char peers[MAX_BOOTSTRAP_PEERS][MAX_ENDPOINT_LEN];
@@ -1215,13 +730,8 @@ static void *mesh_listener_thread(void *arg) {
         mesh_log_verbose(mesh->config, "mesh: tick peers bootstrap=%d wg=%d", peer_count, wg_peer_count);
 
         if (peers_updated_at != mesh->last_applied_peers_updated_at) {
-            mesh_log_verbose(mesh->config, "mesh: peer config changed (applying)");
-            if (mesh_apply_wireguard(mesh) == 0) {
-                mesh->last_applied_peers_updated_at = peers_updated_at;
-                mesh_log_verbose(mesh->config, "mesh: WireGuard config applied");
-            } else {
-                mesh_log_verbose(mesh->config, "mesh: WireGuard config apply failed");
-            }
+            mesh_log_verbose(mesh->config, "mesh: peer config changed");
+            mesh->last_applied_peers_updated_at = peers_updated_at;
         }
 
         for (int i = 0; i < peer_count; i++) {
@@ -1235,15 +745,19 @@ static void *mesh_listener_thread(void *arg) {
         }
 
         for (int i = 0; i < wg_peer_count; i++) {
-            uint16_t web_port = wg_peers[i].web_port ? wg_peers[i].web_port : default_web_port;
+            char host[MAX_ENDPOINT_LEN];
+            uint16_t port = 0;
+            if (mesh_peer_hostport(&wg_peers[i], default_web_port, host, sizeof(host), &port) != 0) {
+                continue;
+            }
             char endpoint[MAX_ENDPOINT_LEN];
-            snprintf(endpoint, sizeof(endpoint), "%s:%u", wg_peers[i].wg_ip, web_port);
-            mesh_log_verbose(mesh->config, "mesh: syncing wireguard peer %s", endpoint);
+            snprintf(endpoint, sizeof(endpoint), "%s:%u", host, port);
+            mesh_log_verbose(mesh->config, "mesh: syncing LAN peer %s", endpoint);
             int rc = mesh_sync_with_peer(mesh, endpoint);
             junknas_config_lock(mesh->config);
             mesh->config->wg_peer_status[i] = (rc == 0) ? 1 : -1;
             junknas_config_unlock(mesh->config);
-            mesh_log_verbose(mesh->config, "mesh: wireguard peer %s sync %s", endpoint, rc == 0 ? "ok" : "failed");
+            mesh_log_verbose(mesh->config, "mesh: LAN peer %s sync %s", endpoint, rc == 0 ? "ok" : "failed");
             if (rc == 0) did_sync = 1;
         }
 
@@ -1251,8 +765,6 @@ static void *mesh_listener_thread(void *arg) {
             mesh_refresh_active(mesh);
         }
 
-        mesh_update_wg_peer_status(mesh);
-        mesh_log_peer_packets(mesh);
 
         for (int i = 0; i < MESH_SYNC_INTERVAL_SEC && !mesh->stop; i++) {
             sleep(1);
@@ -1359,34 +871,38 @@ int junknas_mesh_fetch_chunk(junknas_mesh_t *mesh, const char *hashhex, const ch
     mesh_log_verbose(mesh->config, "mesh: fetch chunk %s -> %s", hashhex, dest_path);
 
     junknas_config_lock(mesh->config);
-    mesh_peer_t peers[MESH_MAX_PEERS];
+    junknas_wg_peer_t peers[MESH_MAX_PEERS];
     int peer_count = mesh->config->wg_peer_count;
     if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
     for (int i = 0; i < peer_count; i++) {
-        snprintf(peers[i].wg_ip, sizeof(peers[i].wg_ip), "%s", mesh->config->wg_peers[i].wg_ip);
-        peers[i].web_port = mesh->config->wg_peers[i].web_port ?
-            mesh->config->wg_peers[i].web_port : mesh->config->web_port;
+        peers[i] = mesh->config->wg_peers[i];
     }
+    uint16_t default_web_port = mesh->config->web_port;
     junknas_config_unlock(mesh->config);
 
     for (int i = 0; i < peer_count; i++) {
+        char host[MAX_ENDPOINT_LEN];
+        uint16_t port = 0;
+        if (mesh_peer_hostport(&peers[i], default_web_port, host, sizeof(host), &port) != 0) {
+            continue;
+        }
         char request[512];
         snprintf(request, sizeof(request),
                  "GET /chunks/%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
-                 hashhex, peers[i].wg_ip);
+                 hashhex, host);
 
         FILE *out = fopen(dest_path, "wb");
         if (!out) continue;
         int status = 0;
         mesh_log_verbose(mesh->config, "mesh: fetching chunk %s from %s:%u",
-                         hashhex, peers[i].wg_ip, peers[i].web_port);
-        int rc = http_request(mesh->config, peers[i].wg_ip, peers[i].web_port,
+                         hashhex, host, port);
+        int rc = http_request(mesh->config, host, port,
                               request, NULL, 0, out, &status);
         fclose(out);
 
         if (rc == 0) {
             mesh_log_verbose(mesh->config, "mesh: fetch chunk %s succeeded via %s:%u",
-                             hashhex, peers[i].wg_ip, peers[i].web_port);
+                             hashhex, host, port);
             return 0;
         }
         (void)unlink(dest_path);
@@ -1405,24 +921,28 @@ int junknas_mesh_replicate_chunk(junknas_mesh_t *mesh,
     mesh_log_verbose(mesh->config, "mesh: replicate chunk %s (%zu bytes)", hashhex, len);
 
     junknas_config_lock(mesh->config);
-    mesh_peer_t peers[MESH_MAX_PEERS];
+    junknas_wg_peer_t peers[MESH_MAX_PEERS];
     int peer_count = mesh->config->wg_peer_count;
     if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
     for (int i = 0; i < peer_count; i++) {
-        snprintf(peers[i].wg_ip, sizeof(peers[i].wg_ip), "%s", mesh->config->wg_peers[i].wg_ip);
-        peers[i].web_port = mesh->config->wg_peers[i].web_port ?
-            mesh->config->wg_peers[i].web_port : mesh->config->web_port;
+        peers[i] = mesh->config->wg_peers[i];
     }
+    uint16_t default_web_port = mesh->config->web_port;
     junknas_config_unlock(mesh->config);
 
     for (int i = 0; i < peer_count; i++) {
+        char host[MAX_ENDPOINT_LEN];
+        uint16_t port = 0;
+        if (mesh_peer_hostport(&peers[i], default_web_port, host, sizeof(host), &port) != 0) {
+            continue;
+        }
         char request[512];
         snprintf(request, sizeof(request),
                  "POST /chunks/%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nContent-Length: %zu\r\n\r\n",
-                 hashhex, peers[i].wg_ip, len);
+                 hashhex, host, len);
         mesh_log_verbose(mesh->config, "mesh: replicating chunk %s -> %s:%u",
-                         hashhex, peers[i].wg_ip, peers[i].web_port);
-        (void)http_request(mesh->config, peers[i].wg_ip, peers[i].web_port,
+                         hashhex, host, port);
+        (void)http_request(mesh->config, host, port,
                            request, data, len, NULL, NULL);
     }
 
@@ -1450,17 +970,6 @@ junknas_mesh_t *junknas_mesh_start(junknas_config_t *config) {
     mesh_log_verbose(config, "mesh: starting mesh services");
     mesh_ensure_local_mount(mesh);
 
-    if (mesh_ensure_wg_keys(mesh) != 0) {
-        mesh_log_verbose(config, "mesh: WireGuard key setup failed");
-        pthread_mutex_destroy(&mesh->lock);
-        free(mesh);
-        return NULL;
-    }
-
-    (void)mesh_refresh_public_endpoint(mesh, 1);
-
-    mesh_log_verbose(config, "mesh: applying WireGuard configuration");
-    (void)mesh_apply_wireguard(mesh);
     junknas_config_lock(mesh->config);
     mesh->last_applied_peers_updated_at = mesh->config->wg_peers_updated_at;
     junknas_config_unlock(mesh->config);
