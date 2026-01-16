@@ -757,8 +757,8 @@ void junknas_config_unlock(junknas_config_t *config) {
 
 static int wg_peer_equal(const junknas_wg_peer_t *a, const junknas_wg_peer_t *b) {
     if (!a || !b) return 0;
-    if (strcmp(a->public_key, b->public_key) != 0) return 0;
     if (strcmp(a->endpoint, b->endpoint) != 0) return 0;
+    if (strcmp(a->public_key, b->public_key) != 0) return 0;
     if (strcmp(a->wg_ip, b->wg_ip) != 0) return 0;
     if (a->persistent_keepalive != b->persistent_keepalive) return 0;
     if (a->web_port != b->web_port) return 0;
@@ -766,14 +766,25 @@ static int wg_peer_equal(const junknas_wg_peer_t *a, const junknas_wg_peer_t *b)
 }
 
 int junknas_config_upsert_wg_peer(junknas_config_t *config, const junknas_wg_peer_t *peer) {
-    if (!config || !peer || peer->public_key[0] == '\0') return -1;
+    if (!config || !peer) return -1;
+    const char *endpoint = peer->endpoint;
+    const char *public_key = peer->public_key;
+    const char *wg_ip = peer->wg_ip;
+    if (endpoint[0] == '\0' && public_key[0] == '\0' && wg_ip[0] == '\0') return -1;
 
     for (int i = 0; i < config->wg_peer_count; i++) {
-        if (strcmp(config->wg_peers[i].public_key, peer->public_key) == 0) {
-            if (wg_peer_equal(&config->wg_peers[i], peer)) return 0;
-            config->wg_peers[i] = *peer;
-            return 1;
+        int match = 0;
+        if (endpoint[0] != '\0') {
+            match = (strcmp(config->wg_peers[i].endpoint, endpoint) == 0);
+        } else if (public_key[0] != '\0') {
+            match = (strcmp(config->wg_peers[i].public_key, public_key) == 0);
+        } else if (wg_ip[0] != '\0') {
+            match = (strcmp(config->wg_peers[i].wg_ip, wg_ip) == 0);
         }
+        if (!match) continue;
+        if (wg_peer_equal(&config->wg_peers[i], peer)) return 0;
+        config->wg_peers[i] = *peer;
+        return 1;
     }
 
     if (config->wg_peer_count >= MAX_WG_PEERS) {
@@ -899,7 +910,6 @@ int junknas_config_validate(const junknas_config_t *config) {
     }
     if (config->mount_point[0] == '\0') return -1;
     if (config->wg.interface_name[0] == '\0') return -1;
-    if (config->wg.wg_ip[0] == '\0') return -1;
 
     /* Storage: require parse success */
     if (config->max_storage_bytes == 0) return -1;
@@ -925,8 +935,9 @@ int junknas_config_validate(const junknas_config_t *config) {
         return -1;
     }
     for (int i = 0; i < config->wg_peer_count; i++) {
-        if (config->wg_peers[i].public_key[0] == '\0') return -1;
-        if (config->wg_peers[i].wg_ip[0] == '\0') return -1;
+        if (config->wg_peers[i].endpoint[0] == '\0' && config->wg_peers[i].wg_ip[0] == '\0') {
+            return -1;
+        }
     }
 
     return 0;
