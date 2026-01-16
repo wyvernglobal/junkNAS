@@ -79,6 +79,14 @@ static const char *jn_get_home_dir(void) {
         return home;
     }
 
+    const char *user = getenv("USER");
+    if (user && user[0] != '\0') {
+        static char user_home[MAX_PATH_LEN];
+        if (snprintf(user_home, sizeof(user_home), "/home/%s", user) < (int)sizeof(user_home)) {
+            return user_home;
+        }
+    }
+
     struct passwd *pw = getpwuid(getuid());
     if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
         return pw->pw_dir;
