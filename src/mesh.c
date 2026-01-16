@@ -1090,6 +1090,7 @@ static void *mesh_listener_thread(void *arg) {
             snprintf(peers[i], sizeof(peers[i]), "%s", mesh->config->bootstrap_peers[i]);
         }
         int wg_peer_count = mesh->config->wg_peer_count;
+        uint64_t peers_updated_at = mesh->config->wg_peers_updated_at;
         uint16_t default_web_port = mesh->config->web_port;
         junknas_wg_peer_t wg_peers[MESH_MAX_PEERS];
         if (wg_peer_count > MESH_MAX_PEERS) wg_peer_count = MESH_MAX_PEERS;
@@ -1097,6 +1098,12 @@ static void *mesh_listener_thread(void *arg) {
             wg_peers[i] = mesh->config->wg_peers[i];
         }
         junknas_config_unlock(mesh->config);
+
+        if (peers_updated_at != mesh->last_applied_peers_updated_at) {
+            if (mesh_apply_wireguard(mesh) == 0) {
+                mesh->last_applied_peers_updated_at = peers_updated_at;
+            }
+        }
 
         for (int i = 0; i < peer_count; i++) {
             int rc = mesh_sync_with_peer(mesh, peers[i]);
@@ -1115,17 +1122,6 @@ static void *mesh_listener_thread(void *arg) {
             mesh->config->wg_peer_status[i] = (rc == 0) ? 1 : 0;
             junknas_config_unlock(mesh->config);
             if (rc == 0) did_sync = 1;
-        }
-
-        uint64_t peers_updated_at = 0;
-        junknas_config_lock(mesh->config);
-        peers_updated_at = mesh->config->wg_peers_updated_at;
-        junknas_config_unlock(mesh->config);
-
-        if (peers_updated_at != mesh->last_applied_peers_updated_at) {
-            if (mesh_apply_wireguard(mesh) == 0) {
-                mesh->last_applied_peers_updated_at = peers_updated_at;
-            }
         }
 
         if (!did_sync) {
