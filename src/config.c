@@ -38,7 +38,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <cjson/cJSON.h>
+
+#include "wireguard.h"
 
 /* ------------------------------ Helpers ---------------------------------- */
 
@@ -160,6 +163,46 @@ static int write_entire_file_atomic(const char *path, const char *data) {
     }
 
     return 0;
+}
+
+static int normalize_key_string(const char *input, char *out, size_t out_len) {
+    if (!input || !out || out_len == 0) return -1;
+
+    while (*input && isspace((unsigned char)*input)) {
+        input++;
+    }
+
+    size_t len = strlen(input);
+    while (len > 0 && isspace((unsigned char)input[len - 1])) {
+        len--;
+    }
+
+    if (len == 0 || len >= out_len) return -1;
+    memcpy(out, input, len);
+    out[len] = '\0';
+    return 0;
+}
+
+static int build_private_key_path(const junknas_config_t *config, char *out, size_t out_len) {
+    if (!config || !out || out_len == 0) return -1;
+
+    if (config->config_file_path[0] == '\0') {
+        return safe_strcpy(out, out_len, "private.key");
+    }
+
+    const char *slash = strrchr(config->config_file_path, '/');
+    if (!slash) {
+        return safe_strcpy(out, out_len, "private.key");
+    }
+
+    size_t dir_len = (size_t)(slash - config->config_file_path);
+    if (dir_len == 0) {
+        return snprintf(out, out_len, "/private.key") >= (int)out_len ? -1 : 0;
+    }
+
+    return snprintf(out, out_len, "%.*s/private.key", (int)dir_len, config->config_file_path) >= (int)out_len
+               ? -1
+               : 0;
 }
 
 /* -------------------------- Public API ----------------------------------- */
@@ -411,6 +454,84 @@ int junknas_config_validate(const junknas_config_t *config) {
     for (int i = 0; i < config->wg_peer_count; i++) {
         if (config->wg_peers[i].public_key[0] == '\0') return -1;
         if (config->wg_peers[i].wg_ip[0] == '\0') return -1;
+    }
+
+    return 0;
+}
+
+int junknas_config_ensure_wg_keys(junknas_config_t *config) {
+    if (!config) return -1;
+
+    char private_key_path[MAX_PATH_LEN];
+    if (build_private_key_path(config, private_key_path, sizeof(private_key_path)) != 0) {
+        return -1;
+    }
+
+    junknas_config_lock(config);
+
+    wg_key private_key;
+    wg_key public_key;
+    wg_key_b64_string pub_b64;
+    bool have_private = false;
+    bool changed = false;
+    bool should_write_private = false;
+
+    char *file_contents = NULL;
+    if (read_entire_file(private_key_path, &file_contents, NULL) == 0) {
+        char normalized[MAX_WG_KEY_LEN];
+        if (normalize_key_string(file_contents, normalized, sizeof(normalized)) == 0 &&
+            wg_key_from_base64(private_key, normalized) == 0) {
+            if (strcmp(config->wg.private_key, normalized) != 0) {
+                (void)safe_strcpy(config->wg.private_key, sizeof(config->wg.private_key), normalized);
+                changed = true;
+            }
+            have_private = true;
+        }
+    }
+    free(file_contents);
+
+    if (!have_private) {
+        if (config->wg.private_key[0] != '\0' &&
+            wg_key_from_base64(private_key, config->wg.private_key) == 0) {
+            have_private = true;
+        } else {
+            wg_key_b64_string priv_b64;
+            wg_generate_private_key(private_key);
+            wg_key_to_base64(priv_b64, private_key);
+            (void)safe_strcpy(config->wg.private_key, sizeof(config->wg.private_key), priv_b64);
+            changed = true;
+            have_private = true;
+        }
+        should_write_private = true;
+    }
+
+    if (!have_private) {
+        junknas_config_unlock(config);
+        return -1;
+    }
+
+    if (wg_key_from_base64(private_key, config->wg.private_key) != 0) {
+        junknas_config_unlock(config);
+        return -1;
+    }
+
+    wg_generate_public_key(public_key, private_key);
+    wg_key_to_base64(pub_b64, public_key);
+    if (strcmp(config->wg.public_key, pub_b64) != 0) {
+        (void)safe_strcpy(config->wg.public_key, sizeof(config->wg.public_key), pub_b64);
+        changed = true;
+    }
+
+    junknas_config_unlock(config);
+
+    if (should_write_private) {
+        if (write_entire_file_atomic(private_key_path, config->wg.private_key) != 0) {
+            return -1;
+        }
+    }
+
+    if (changed) {
+        return junknas_config_save(config, config->config_file_path);
     }
 
     return 0;
@@ -751,6 +872,10 @@ int junknas_config_init(junknas_config_t *config, const char *config_file) {
         if (junknas_config_load(config, config_file) != 0) {
             return -1;
         }
+    }
+
+    if (junknas_config_ensure_wg_keys(config) != 0) {
+        return -1;
     }
 
     /* Validate final config */
