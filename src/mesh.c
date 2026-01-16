@@ -158,6 +158,52 @@ static void mesh_log_peer_packets(struct junknas_mesh *mesh) {
     wg_free_device(dev);
 }
 
+static void mesh_update_wg_peer_status(struct junknas_mesh *mesh) {
+    if (!mesh || !mesh->config) return;
+
+    char iface[32];
+    char public_keys[MESH_MAX_PEERS][MAX_WG_KEY_LEN];
+    int peer_count = 0;
+
+    junknas_config_lock(mesh->config);
+    snprintf(iface, sizeof(iface), "%s", mesh->config->wg.interface_name);
+    peer_count = mesh->config->wg_peer_count;
+    if (peer_count > MESH_MAX_PEERS) peer_count = MESH_MAX_PEERS;
+    for (int i = 0; i < peer_count; i++) {
+        snprintf(public_keys[i], sizeof(public_keys[i]), "%s", mesh->config->wg_peers[i].public_key);
+    }
+    junknas_config_unlock(mesh->config);
+
+    wg_device *dev = NULL;
+    if (wg_get_device(&dev, iface) != 0 || !dev) return;
+
+    int statuses[MESH_MAX_PEERS];
+    for (int i = 0; i < peer_count; i++) {
+        statuses[i] = -1;
+    }
+
+    for (wg_peer *peer = dev->first_peer; peer; peer = peer->next_peer) {
+        wg_key_b64_string public_key;
+        wg_key_to_base64(public_key, peer->public_key);
+        for (int i = 0; i < peer_count; i++) {
+            if (strcmp(public_keys[i], public_key) == 0) {
+                if (peer->last_handshake_time.tv_sec != 0) {
+                    statuses[i] = 1;
+                }
+                break;
+            }
+        }
+    }
+
+    junknas_config_lock(mesh->config);
+    for (int i = 0; i < peer_count; i++) {
+        mesh->config->wg_peer_status[i] = statuses[i];
+    }
+    junknas_config_unlock(mesh->config);
+
+    wg_free_device(dev);
+}
+
 static int read_entire_file(const char *path, char **out_buf, size_t *out_len) {
     FILE *f = NULL;
     char *buf = NULL;
@@ -1119,7 +1165,7 @@ static void *mesh_listener_thread(void *arg) {
             snprintf(endpoint, sizeof(endpoint), "%s:%u", wg_peers[i].wg_ip, web_port);
             int rc = mesh_sync_with_peer(mesh, endpoint);
             junknas_config_lock(mesh->config);
-            mesh->config->wg_peer_status[i] = (rc == 0) ? 1 : 0;
+            mesh->config->wg_peer_status[i] = (rc == 0) ? 1 : -1;
             junknas_config_unlock(mesh->config);
             if (rc == 0) did_sync = 1;
         }
@@ -1128,6 +1174,7 @@ static void *mesh_listener_thread(void *arg) {
             mesh_refresh_active(mesh);
         }
 
+        mesh_update_wg_peer_status(mesh);
         mesh_log_peer_packets(mesh);
 
         for (int i = 0; i < MESH_SYNC_INTERVAL_SEC && !mesh->stop; i++) {

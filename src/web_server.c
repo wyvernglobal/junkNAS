@@ -502,9 +502,19 @@ static void respond_mesh_config(int fd, junknas_config_t *config) {
 }
 
 static const char *status_label(int status) {
-    if (status > 0) return "central";
-    if (status == 0) return "dead_end";
-    return "unknown";
+    if (status > 0) return "connected";
+    if (status == 0) return "unreachable";
+    return "connecting";
+}
+
+static void mark_wg_peer_connecting(junknas_config_t *config, const char *public_key) {
+    if (!config || !public_key || public_key[0] == '\0') return;
+    for (int i = 0; i < config->wg_peer_count; i++) {
+        if (strcmp(config->wg_peers[i].public_key, public_key) == 0) {
+            config->wg_peer_status[i] = -1;
+            return;
+        }
+    }
 }
 
 static void respond_mesh_status(int fd, junknas_config_t *config) {
@@ -598,6 +608,9 @@ static void respond_mesh_ui(int fd) {
              ".checkbox{display:flex;align-items:center;gap:8px;margin-top:8px;}"
              ".actions{margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;}"
              ".badge{display:inline-block;padding:2px 6px;border-radius:4px;background:#eee;font-size:12px;}"
+             ".badge.connected{background:#e6f7ec;color:#126b2d;}"
+             ".badge.connecting{background:#fff4e5;color:#8a3b00;}"
+             ".badge.unreachable{background:#ffe8e8;color:#a60000;}"
              "</style>");
     send_all(fd, "<h1>junkNAS mesh settings</h1>");
     send_all(fd, "<div id=\"mesh-role\" class=\"status\">Checking mesh status…</div>");
@@ -674,14 +687,15 @@ static void respond_mesh_ui(int fd) {
              "tbody.innerHTML='';"
              "wgPeers.forEach((peer,index)=>{"
              "const row=document.createElement('tr');"
-             "const status=statusMap.wg[index]||'unknown';"
+             "const status=statusMap.wg[index]||'connecting';"
+             "const statusClass=status.replace(/[^a-z0-9_-]/gi,'-');"
              "row.innerHTML=`"
              "<td>${escapeHtml(peer.public_key||'')}</td>"
              "<td>${escapeHtml(peer.endpoint||'')}</td>"
              "<td>${escapeHtml(peer.wg_ip||'')}</td>"
              "<td>${escapeHtml(String(peer.persistent_keepalive||''))}</td>"
              "<td>${escapeHtml(String(peer.web_port||''))}</td>"
-             "<td><span class='badge'>${escapeHtml(status)}</span></td>`;"
+             "<td><span class='badge ${statusClass}'>${escapeHtml(status)}</span></td>`;"
              "tbody.appendChild(row);"
              "});"
              "}"
@@ -720,7 +734,11 @@ static void respond_mesh_ui(int fd) {
              "}"
              "statusMap.bootstrap=(data.bootstrap_peers||[]).map(p=>p.status);"
              "statusMap.wg=(data.wg_peers||[]).map(p=>p.status);"
-             "const bootstrapList=(data.bootstrap_peers||[]).map(p=>`<div><span class='badge'>${escapeHtml(p.status||'unknown')}</span> ${escapeHtml(p.endpoint||'')}</div>`).join('');"
+             "const bootstrapList=(data.bootstrap_peers||[]).map(p=>{"
+             "const status=(p.status||'connecting');"
+             "const statusClass=status.replace(/[^a-z0-9_-]/gi,'-');"
+             "return `<div><span class='badge ${statusClass}'>${escapeHtml(status)}</span> ${escapeHtml(p.endpoint||'')}</div>`;"
+             "}).join('');"
              "document.getElementById('bootstrap-status').innerHTML=bootstrapList||'<em>No LAN peers.</em>';"
              "}"
              "document.getElementById('save-config').addEventListener('click',async()=>{"
@@ -985,6 +1003,9 @@ static int respond_mesh_bootstrap(int fd, junknas_config_t *config) {
         send_status(fd, 400, "Bad Request");
         return -1;
     }
+    if (upserted > 0) {
+        mark_wg_peer_connecting(config, peer_public);
+    }
     config->wg_peers_updated_at = (uint64_t)now;
     (void)junknas_config_save(config, config->config_file_path);
     junknas_config_unlock(config);
@@ -1145,6 +1166,9 @@ static int respond_mesh_join(int fd, junknas_config_t *config, const char *paylo
         cJSON_Delete(root);
         send_status(fd, 400, "Bad Request");
         return -1;
+    }
+    if (upserted > 0) {
+        mark_wg_peer_connecting(config, server_peer.public_key);
     }
     config->wg_peers_updated_at = (uint64_t)now;
     (void)junknas_config_save(config, config->config_file_path);
