@@ -533,7 +533,10 @@ static int build_config_file_path(const char *config_file, char *out, size_t out
     const char *base = NULL;
     if (config_file) {
         const char *slash = strrchr(config_file, '/');
-        base = slash ? slash + 1 : config_file;
+        if (slash) {
+            return snprintf(out, out_len, "%s", config_file) >= (int)out_len ? -1 : 0;
+        }
+        base = config_file;
     }
     if (!base || base[0] == '\0') {
         base = DEFAULT_CONFIG_FILE_NAME;
