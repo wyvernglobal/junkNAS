@@ -34,16 +34,282 @@
 #include "config.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <ctype.h>
 #include <cjson/cJSON.h>
 
-#include "wireguard.h"
-
 /* ------------------------------ Helpers ---------------------------------- */
+
+typedef uint8_t jn_wg_key[32];
+typedef char jn_wg_key_b64_string[((sizeof(jn_wg_key) + 2) / 3) * 4 + 1];
+
+static void jn_wg_encode_base64(char dest[static 4], const uint8_t src[static 3]) {
+    const uint8_t input[] = {
+        (src[0] >> 2) & 63,
+        ((src[0] << 4) | (src[1] >> 4)) & 63,
+        ((src[1] << 2) | (src[2] >> 6)) & 63,
+        src[2] & 63
+    };
+
+    for (unsigned int i = 0; i < 4; ++i) {
+        dest[i] = input[i] + 'A'
+                  + (((25 - input[i]) >> 8) & 6)
+                  - (((51 - input[i]) >> 8) & 75)
+                  - (((61 - input[i]) >> 8) & 15)
+                  + (((62 - input[i]) >> 8) & 3);
+    }
+}
+
+static void jn_wg_key_to_base64(jn_wg_key_b64_string base64, const jn_wg_key key) {
+    unsigned int i;
+
+    for (i = 0; i < 32 / 3; ++i) {
+        jn_wg_encode_base64(&base64[i * 4], &key[i * 3]);
+    }
+    jn_wg_encode_base64(&base64[i * 4], (const uint8_t[]){ key[i * 3 + 0], key[i * 3 + 1], 0 });
+    base64[sizeof(jn_wg_key_b64_string) - 2] = '=';
+    base64[sizeof(jn_wg_key_b64_string) - 1] = '\0';
+}
+
+static int jn_wg_decode_base64(const char src[static 4]) {
+    int val = 0;
+
+    for (unsigned int i = 0; i < 4; ++i) {
+        val |= (-1
+                + ((((('A' - 1) - src[i]) & (src[i] - ('Z' + 1))) >> 8) & (src[i] - 64))
+                + ((((('a' - 1) - src[i]) & (src[i] - ('z' + 1))) >> 8) & (src[i] - 70))
+                + ((((('0' - 1) - src[i]) & (src[i] - ('9' + 1))) >> 8) & (src[i] + 5))
+                + ((((('+' - 1) - src[i]) & (src[i] - ('+' + 1))) >> 8) & 63)
+                + ((((('/' - 1) - src[i]) & (src[i] - ('/' + 1))) >> 8) & 64)
+            ) << (18 - 6 * i);
+    }
+    return val;
+}
+
+static int jn_wg_key_from_base64(jn_wg_key key, const jn_wg_key_b64_string base64) {
+    unsigned int i;
+    int val;
+    volatile uint8_t ret = 0;
+
+    if (strlen(base64) != sizeof(jn_wg_key_b64_string) - 1 ||
+        base64[sizeof(jn_wg_key_b64_string) - 2] != '=') {
+        errno = EINVAL;
+        goto out;
+    }
+
+    for (i = 0; i < 32 / 3; ++i) {
+        val = jn_wg_decode_base64(&base64[i * 4]);
+        ret |= (uint32_t)val >> 31;
+        key[i * 3 + 0] = (val >> 16) & 0xff;
+        key[i * 3 + 1] = (val >> 8) & 0xff;
+        key[i * 3 + 2] = val & 0xff;
+    }
+    val = jn_wg_decode_base64((const char[]){ base64[i * 4 + 0], base64[i * 4 + 1], base64[i * 4 + 2], 'A' });
+    ret |= ((uint32_t)val >> 31) | (val & 0xff);
+    key[i * 3 + 0] = (val >> 16) & 0xff;
+    key[i * 3 + 1] = (val >> 8) & 0xff;
+    errno = EINVAL & ~((ret - 1) >> 8);
+out:
+    return -errno;
+}
+
+typedef int64_t jn_wg_fe[16];
+
+static __attribute__((noinline)) void jn_wg_memzero_explicit(void *s, size_t count) {
+    memset(s, 0, count);
+    __asm__ __volatile__("" : : "r"(s) : "memory");
+}
+
+static void jn_wg_carry(jn_wg_fe o) {
+    for (int i = 0; i < 16; ++i) {
+        o[(i + 1) % 16] += (i == 15 ? 38 : 1) * (o[i] >> 16);
+        o[i] &= 0xffff;
+    }
+}
+
+static void jn_wg_cswap(jn_wg_fe p, jn_wg_fe q, int b) {
+    int64_t t;
+    int64_t c = ~(b - 1);
+
+    for (int i = 0; i < 16; ++i) {
+        t = c & (p[i] ^ q[i]);
+        p[i] ^= t;
+        q[i] ^= t;
+    }
+
+    jn_wg_memzero_explicit(&t, sizeof(t));
+    jn_wg_memzero_explicit(&c, sizeof(c));
+    jn_wg_memzero_explicit(&b, sizeof(b));
+}
+
+static void jn_wg_pack(uint8_t *o, const jn_wg_fe n) {
+    int b;
+    jn_wg_fe m;
+    jn_wg_fe t;
+
+    memcpy(t, n, sizeof(t));
+    jn_wg_carry(t);
+    jn_wg_carry(t);
+    jn_wg_carry(t);
+    for (int j = 0; j < 2; ++j) {
+        m[0] = t[0] - 0xffed;
+        for (int i = 1; i < 15; ++i) {
+            m[i] = t[i] - 0xffff - ((m[i - 1] >> 16) & 1);
+            m[i - 1] &= 0xffff;
+        }
+        m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
+        b = (m[15] >> 16) & 1;
+        m[14] &= 0xffff;
+        jn_wg_cswap(t, m, 1 - b);
+    }
+    for (int i = 0; i < 16; ++i) {
+        o[2 * i] = t[i] & 0xff;
+        o[2 * i + 1] = t[i] >> 8;
+    }
+
+    jn_wg_memzero_explicit(m, sizeof(m));
+    jn_wg_memzero_explicit(t, sizeof(t));
+    jn_wg_memzero_explicit(&b, sizeof(b));
+}
+
+static void jn_wg_add(jn_wg_fe o, const jn_wg_fe a, const jn_wg_fe b) {
+    for (int i = 0; i < 16; ++i) {
+        o[i] = a[i] + b[i];
+    }
+}
+
+static void jn_wg_subtract(jn_wg_fe o, const jn_wg_fe a, const jn_wg_fe b) {
+    for (int i = 0; i < 16; ++i) {
+        o[i] = a[i] - b[i];
+    }
+}
+
+static void jn_wg_multmod(jn_wg_fe o, const jn_wg_fe a, const jn_wg_fe b) {
+    int64_t t[31] = { 0 };
+
+    for (int i = 0; i < 16; ++i) {
+        for (int j = 0; j < 16; ++j) {
+            t[i + j] += a[i] * b[j];
+        }
+    }
+    for (int i = 0; i < 15; ++i) {
+        t[i] += 38 * t[i + 16];
+    }
+    memcpy(o, t, sizeof(jn_wg_fe));
+    jn_wg_carry(o);
+    jn_wg_carry(o);
+
+    jn_wg_memzero_explicit(t, sizeof(t));
+}
+
+static void jn_wg_invert(jn_wg_fe o, const jn_wg_fe i) {
+    jn_wg_fe c;
+
+    memcpy(c, i, sizeof(c));
+    for (int a = 253; a >= 0; --a) {
+        jn_wg_multmod(c, c, c);
+        if (a != 2 && a != 4) {
+            jn_wg_multmod(c, c, i);
+        }
+    }
+    memcpy(o, c, sizeof(jn_wg_fe));
+
+    jn_wg_memzero_explicit(c, sizeof(c));
+}
+
+static void jn_wg_clamp_key(uint8_t *z) {
+    z[31] = (z[31] & 127) | 64;
+    z[0] &= 248;
+}
+
+static void jn_wg_generate_public_key(jn_wg_key public_key, const jn_wg_key private_key) {
+    int r;
+    uint8_t z[32];
+    jn_wg_fe a = { 1 }, b = { 9 }, c = { 0 }, d = { 1 }, e, f;
+
+    memcpy(z, private_key, sizeof(z));
+    jn_wg_clamp_key(z);
+
+    for (int i = 254; i >= 0; --i) {
+        r = (z[i >> 3] >> (i & 7)) & 1;
+        jn_wg_cswap(a, b, r);
+        jn_wg_cswap(c, d, r);
+        jn_wg_add(e, a, c);
+        jn_wg_subtract(a, a, c);
+        jn_wg_add(c, b, d);
+        jn_wg_subtract(b, b, d);
+        jn_wg_multmod(d, e, e);
+        jn_wg_multmod(f, a, a);
+        jn_wg_multmod(a, c, a);
+        jn_wg_multmod(c, b, e);
+        jn_wg_add(e, a, c);
+        jn_wg_subtract(a, a, c);
+        jn_wg_multmod(b, a, a);
+        jn_wg_subtract(c, d, f);
+        jn_wg_multmod(a, c, (const jn_wg_fe){ 0xdb41, 1 });
+        jn_wg_add(a, a, d);
+        jn_wg_multmod(c, c, a);
+        jn_wg_multmod(a, d, f);
+        jn_wg_multmod(d, b, (const jn_wg_fe){ 9 });
+        jn_wg_multmod(b, e, e);
+        jn_wg_cswap(a, b, r);
+        jn_wg_cswap(c, d, r);
+    }
+    jn_wg_invert(c, c);
+    jn_wg_multmod(a, a, c);
+    jn_wg_pack(public_key, a);
+
+    jn_wg_memzero_explicit(&r, sizeof(r));
+    jn_wg_memzero_explicit(z, sizeof(z));
+    jn_wg_memzero_explicit(a, sizeof(a));
+    jn_wg_memzero_explicit(b, sizeof(b));
+    jn_wg_memzero_explicit(c, sizeof(c));
+    jn_wg_memzero_explicit(d, sizeof(d));
+    jn_wg_memzero_explicit(e, sizeof(e));
+    jn_wg_memzero_explicit(f, sizeof(f));
+}
+
+static void jn_wg_generate_preshared_key(jn_wg_key preshared_key) {
+    ssize_t ret;
+    size_t i;
+    int fd;
+#if defined(__OpenBSD__) || (defined(__APPLE__) && MAC_OS_X_VERSION_MIN_REQUIRED >= MAC_OS_X_VERSION_10_12) || \
+    (defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25)))
+    if (!getentropy(preshared_key, sizeof(jn_wg_key))) {
+        return;
+    }
+#endif
+#if defined(__NR_getrandom) && defined(__linux__)
+    if (syscall(__NR_getrandom, preshared_key, sizeof(jn_wg_key), 0) == sizeof(jn_wg_key)) {
+        return;
+    }
+#endif
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) {
+        return;
+    }
+    for (i = 0; i < sizeof(jn_wg_key); i += (size_t)ret) {
+        ret = read(fd, preshared_key + i, sizeof(jn_wg_key) - i);
+        if (ret <= 0) {
+            close(fd);
+            return;
+        }
+    }
+    close(fd);
+}
+
+static void jn_wg_generate_private_key(jn_wg_key private_key) {
+    jn_wg_generate_preshared_key(private_key);
+    jn_wg_clamp_key(private_key);
+}
 
 /* Safe string copy into fixed-size buffers:
  * - Always NUL-terminates
@@ -469,9 +735,9 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
 
     junknas_config_lock(config);
 
-    wg_key private_key;
-    wg_key public_key;
-    wg_key_b64_string pub_b64;
+    jn_wg_key private_key;
+    jn_wg_key public_key;
+    jn_wg_key_b64_string pub_b64;
     bool have_private = false;
     bool changed = false;
     bool should_write_private = false;
@@ -480,7 +746,7 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
     if (read_entire_file(private_key_path, &file_contents, NULL) == 0) {
         char normalized[MAX_WG_KEY_LEN];
         if (normalize_key_string(file_contents, normalized, sizeof(normalized)) == 0 &&
-            wg_key_from_base64(private_key, normalized) == 0) {
+            jn_wg_key_from_base64(private_key, normalized) == 0) {
             if (strcmp(config->wg.private_key, normalized) != 0) {
                 (void)safe_strcpy(config->wg.private_key, sizeof(config->wg.private_key), normalized);
                 changed = true;
@@ -492,12 +758,12 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
 
     if (!have_private) {
         if (config->wg.private_key[0] != '\0' &&
-            wg_key_from_base64(private_key, config->wg.private_key) == 0) {
+            jn_wg_key_from_base64(private_key, config->wg.private_key) == 0) {
             have_private = true;
         } else {
-            wg_key_b64_string priv_b64;
-            wg_generate_private_key(private_key);
-            wg_key_to_base64(priv_b64, private_key);
+            jn_wg_key_b64_string priv_b64;
+            jn_wg_generate_private_key(private_key);
+            jn_wg_key_to_base64(priv_b64, private_key);
             (void)safe_strcpy(config->wg.private_key, sizeof(config->wg.private_key), priv_b64);
             changed = true;
             have_private = true;
@@ -510,13 +776,13 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
         return -1;
     }
 
-    if (wg_key_from_base64(private_key, config->wg.private_key) != 0) {
+    if (jn_wg_key_from_base64(private_key, config->wg.private_key) != 0) {
         junknas_config_unlock(config);
         return -1;
     }
 
-    wg_generate_public_key(public_key, private_key);
-    wg_key_to_base64(pub_b64, public_key);
+    jn_wg_generate_public_key(public_key, private_key);
+    jn_wg_key_to_base64(pub_b64, public_key);
     if (strcmp(config->wg.public_key, pub_b64) != 0) {
         (void)safe_strcpy(config->wg.public_key, sizeof(config->wg.public_key), pub_b64);
         changed = true;
