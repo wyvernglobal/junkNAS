@@ -9,8 +9,8 @@
 	"daemon_mode":	false,
 	"wireguard":	{
 		"interface_name":	"jnk0",
-		"private_key":	"KH6fV9tvASUiok1TKhsJ6mxGuxdiZjpOyz9JolkFQGQ=",
-		"public_key":	"hrRYFKFlVm5cfyJDOuNy7PrXGwqw0kuCx1ar1+lbykc=",
+		"private_key":	"",
+		"public_key":	"",
 		"wg_ip":	"10.99.0.42",
 		"endpoint":	"example.com:51820",
 		"listen_port":	51820,
