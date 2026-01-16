@@ -562,33 +562,7 @@ static int mesh_apply_wireguard(struct junknas_mesh *mesh) {
 static int mesh_ensure_wg_keys(struct junknas_mesh *mesh) {
     if (!mesh || !mesh->config) return -1;
 
-    junknas_config_lock(mesh->config);
-    wg_key private_key;
-    wg_key public_key;
-    bool changed = false;
-
-    if (mesh->config->wg.private_key[0] == '\0' ||
-        wg_key_from_base64(private_key, mesh->config->wg.private_key) != 0) {
-        wg_generate_private_key(private_key);
-        wg_key_b64_string priv_b64;
-        wg_key_to_base64(priv_b64, private_key);
-        snprintf(mesh->config->wg.private_key, sizeof(mesh->config->wg.private_key), "%s", priv_b64);
-        changed = true;
-    }
-
-    wg_generate_public_key(public_key, private_key);
-    wg_key_b64_string pub_b64;
-    wg_key_to_base64(pub_b64, public_key);
-    if (strcmp(mesh->config->wg.public_key, pub_b64) != 0) {
-        snprintf(mesh->config->wg.public_key, sizeof(mesh->config->wg.public_key), "%s", pub_b64);
-        changed = true;
-    }
-
-    if (changed) {
-        (void)junknas_config_save(mesh->config, mesh->config->config_file_path);
-    }
-    junknas_config_unlock(mesh->config);
-    return 0;
+    return junknas_config_ensure_wg_keys(mesh->config);
 }
 
 static void mesh_refresh_active(struct junknas_mesh *mesh) {
