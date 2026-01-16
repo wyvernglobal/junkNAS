@@ -31,19 +31,25 @@ JUNKNAS_SRCS := \
 	$(SRC_DIR)/web_server.c \
 	$(SRC_DIR)/wireguard.c
 
-TEST_SRCS := \
+TEST_CONFIG_SRCS := \
 	$(SRC_DIR)/test_config.c \
 	$(SRC_DIR)/config.c
 
+TEST_WG_SRCS := \
+	$(SRC_DIR)/test_wireguard.c \
+	$(SRC_DIR)/wireguard.c
+
 JUNKNAS_OBJS := $(JUNKNAS_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
-TEST_OBJS := $(TEST_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+TEST_CONFIG_OBJS := $(TEST_CONFIG_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
+TEST_WG_OBJS := $(TEST_WG_SRCS:$(SRC_DIR)/%.c=$(BUILD_DIR)/%.o)
 
 BIN_JUNKNAS := $(BIN_DIR)/junknas_fuse
-BIN_TEST := $(BIN_DIR)/test_config
+BIN_TEST_CONFIG := $(BIN_DIR)/test_config
+BIN_TEST_WG := $(BIN_DIR)/test_wireguard
 
 .PHONY: all init clean
 
-all: $(BIN_JUNKNAS) $(BIN_TEST)
+all: $(BIN_JUNKNAS) $(BIN_TEST_CONFIG) $(BIN_TEST_WG)
 
 init: all
 	@mkdir -p /tmp/junknas-data /tmp/junknas-mount
@@ -52,8 +58,11 @@ init: all
 $(BIN_JUNKNAS): $(JUNKNAS_OBJS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(JUNKNAS_OBJS) $(LDLIBS) $(FUSE_LIBS) -pthread
 
-$(BIN_TEST): $(TEST_OBJS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(TEST_OBJS) $(LDLIBS) -pthread
+$(BIN_TEST_CONFIG): $(TEST_CONFIG_OBJS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $(TEST_CONFIG_OBJS) $(LDLIBS) -pthread
+
+$(BIN_TEST_WG): $(TEST_WG_OBJS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) -o $@ $(TEST_WG_OBJS) $(LDLIBS) -pthread
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
