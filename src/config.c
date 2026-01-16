@@ -43,6 +43,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <cjson/cJSON.h>
@@ -450,32 +451,46 @@ static int normalize_key_string(const char *input, char *out, size_t out_len) {
     return 0;
 }
 
+static int ensure_config_dir(void) {
+    if (mkdir(DEFAULT_CONFIG_DIR, 0755) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    return 0;
+}
+
+static int build_config_file_path(const char *config_file, char *out, size_t out_len) {
+    if (!out || out_len == 0) return -1;
+    const char *base = NULL;
+    if (config_file) {
+        const char *slash = strrchr(config_file, '/');
+        base = slash ? slash + 1 : config_file;
+    }
+    if (!base || base[0] == '\0') {
+        base = "config.json";
+    }
+    return snprintf(out, out_len, "%s/%s", DEFAULT_CONFIG_DIR, base) >= (int)out_len ? -1 : 0;
+}
+
 static int build_private_key_path(const junknas_config_t *config, char *out, size_t out_len) {
     if (!config || !out || out_len == 0) return -1;
 
     if (config->config_file_path[0] == '\0') {
-        return safe_strcpy(out, out_len, "private.key");
+        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
     }
 
     const char *slash = strrchr(config->config_file_path, '/');
     if (!slash) {
-        return safe_strcpy(out, out_len, "private.key");
+        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
     }
 
     size_t dir_len = (size_t)(slash - config->config_file_path);
     if (dir_len == 0) {
-        return snprintf(out, out_len, "/private.key") >= (int)out_len ? -1 : 0;
+        return snprintf(out, out_len, "%s/private.key", DEFAULT_CONFIG_DIR) >= (int)out_len ? -1 : 0;
     }
 
     return snprintf(out, out_len, "%.*s/private.key", (int)dir_len, config->config_file_path) >= (int)out_len
                ? -1
                : 0;
-}
-
-static int build_private_key_fallback_path(const junknas_config_t *config, char *out, size_t out_len) {
-    if (!config || !out || out_len == 0) return -1;
-    if (config->data_dir[0] == '\0') return -1;
-    return snprintf(out, out_len, "%s/private.key", config->data_dir) >= (int)out_len ? -1 : 0;
 }
 
 /* -------------------------- Public API ----------------------------------- */
@@ -770,15 +785,9 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
     if (!config) return -1;
 
     char private_key_path[MAX_PATH_LEN];
-    char fallback_key_path[MAX_PATH_LEN];
-    bool have_fallback_path = false;
     if (build_private_key_path(config, private_key_path, sizeof(private_key_path)) != 0) {
         config_log_verbose(config, "config: failed to build WireGuard key path");
         return -1;
-    }
-    if (build_private_key_fallback_path(config, fallback_key_path, sizeof(fallback_key_path)) == 0 &&
-        strcmp(fallback_key_path, private_key_path) != 0) {
-        have_fallback_path = true;
     }
 
     config_log_verbose(config, "config: ensuring WireGuard keys in %s", private_key_path);
@@ -808,26 +817,6 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
     }
     free(file_contents);
     file_contents = NULL;
-
-    if (!have_private && have_fallback_path) {
-        if (read_entire_file(fallback_key_path, &file_contents, NULL) == 0) {
-            char normalized[MAX_WG_KEY_LEN];
-            if (normalize_key_string(file_contents, normalized, sizeof(normalized)) == 0 &&
-                jn_wg_key_from_base64(private_key, normalized) == 0) {
-                if (strcmp(config->wg.private_key, normalized) != 0) {
-                    (void)safe_strcpy(config->wg.private_key, sizeof(config->wg.private_key), normalized);
-                    changed = true;
-                }
-                have_private = true;
-                config_log_verbose(config, "config: loaded existing WireGuard private key from %s",
-                                   fallback_key_path);
-            }
-        } else {
-            config_log_verbose(config, "config: no private key file found at %s", fallback_key_path);
-        }
-        free(file_contents);
-        file_contents = NULL;
-    }
 
     if (!have_private) {
         if (config->wg.private_key[0] != '\0' &&
@@ -868,15 +857,14 @@ int junknas_config_ensure_wg_keys(junknas_config_t *config) {
     junknas_config_unlock(config);
 
     if (should_write_private) {
+        if (ensure_config_dir() != 0) {
+            config_log_verbose(config, "config: failed to ensure config dir %s", DEFAULT_CONFIG_DIR);
+            return -1;
+        }
         if (write_entire_file_atomic(private_key_path, config->wg.private_key) != 0) {
             config_log_verbose(config,
                                "config: failed to write private key to %s (continuing without key file)",
                                private_key_path);
-            if (have_fallback_path &&
-                write_entire_file_atomic(fallback_key_path, config->wg.private_key) == 0) {
-                config_log_verbose(config, "config: wrote WireGuard private key to %s",
-                                   fallback_key_path);
-            }
         } else {
             config_log_verbose(config, "config: wrote WireGuard private key to %s", private_key_path);
         }
@@ -1208,6 +1196,10 @@ int junknas_config_save(const junknas_config_t *config, const char *config_file)
 
     if (!printed) return -1;
 
+    if (ensure_config_dir() != 0) {
+        free(printed);
+        return -1;
+    }
     int rc = write_entire_file_atomic(config_file, printed);
     free(printed);
     if (rc != 0) {
@@ -1227,15 +1219,20 @@ int junknas_config_init(junknas_config_t *config, const char *config_file) {
 
     /* If config_file provided, use it and also store the path */
     if (config_file && config_file[0] != '\0') {
-        (void)safe_strcpy(config->config_file_path, sizeof(config->config_file_path), config_file);
-        config_log_verbose(config, "config: loading config file %s", config_file);
+        char resolved_path[MAX_PATH_LEN];
+        if (build_config_file_path(config_file, resolved_path, sizeof(resolved_path)) != 0) {
+            config_log_verbose(config, "config: failed to resolve config path");
+            return -1;
+        }
+        (void)safe_strcpy(config->config_file_path, sizeof(config->config_file_path), resolved_path);
+        config_log_verbose(config, "config: loading config file %s", resolved_path);
 
         /* Loading is optional: missing file should not necessarily be fatal
          * BUT: right now we treat load failure as an error to make debugging easy.
          * We can change later to "ignore ENOENT".
          */
-        if (junknas_config_load(config, config_file) != 0) {
-            config_log_verbose(config, "config: failed to load %s", config_file);
+        if (junknas_config_load(config, resolved_path) != 0) {
+            config_log_verbose(config, "config: failed to load %s", resolved_path);
             return -1;
         }
     }
