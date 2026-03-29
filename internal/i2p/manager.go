@@ -2,17 +2,15 @@
 // JunkNAS runs i2pd as a child process. All outbound inter-node HTTP traffic
 // is routed through i2pd's SOCKS5 proxy on 127.0.0.1:4447.
 //
-// i2pd datadir layout (all under configDir, e.g. /var/lib/junknas/i2p):
 //
-//	i2pd.conf     — main router config (auto-generated)
-//	tunnels.conf  — server + client tunnels (auto-generated, hot-reloaded via SIGHUP)
-//	i2pd.log      — router log
-//	smb-server.dat — our persistent I2P destination key (written by i2pd)
-//	destinations/, netDb/, addressbook/ — i2pd runtime state (written by i2pd)
 //
-// The parent of configDir also gets a .i2pd symlink pointing at configDir so
-// that i2pd's $HOME/.i2pd fallback (used when the Debian package ignores
-// --datadir) resolves correctly.
+//	i2pd.conf       — main router config (auto-generated)
+//	tunnels.conf    — server + client tunnels (auto-generated, SIGHUP to reload)
+//	i2pd.log        — router log
+//	smb-server.dat  — persistent I2P destination key (written by i2pd)
+//	destinations/   — i2pd runtime state (written by i2pd)
+//	netDb/          — i2pd network database
+//	addressbook/    — i2pd address book
 package i2p
 
 import (
@@ -20,6 +18,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -53,37 +53,15 @@ type Manager struct {
 }
 
 // New creates a Manager rooted at configDir and writes initial config files.
-// serverPort is the local Samba port (usually 445) — writing the server tunnel
+// configDir should be <datadir>/.i2pd so i2pd operates in its natural home.
+// serverPort is the local Samba port (445) — writing the server tunnel
 // immediately ensures i2pd generates the destination keyfile on first boot.
 func New(configDir string, serverPort int) (*Manager, error) {
-	if err := os.MkdirAll(configDir, 0o750); err != nil {
-		return nil, fmt.Errorf("i2p: mkdir %s: %w", configDir, err)
-	}
-	// Ensure the directory is writable by the current process.
-	// It may have been created by a prior root run.
-	if err := os.Chmod(configDir, 0o750); err != nil {
-		// Non-fatal — the ExecStartPre in the systemd unit handles this.
-		fmt.Fprintf(os.Stderr, "[i2p] warn: chmod %s: %v\n", configDir, err)
-	}
-
-	// Create $parent/.i2pd → configDir symlink so i2pd's $HOME/.i2pd fallback
-	// (used when the Debian package ignores --datadir) finds our config.
-	homeDir := filepath.Dir(configDir)
-	dotI2pd := filepath.Join(homeDir, ".i2pd")
-	if _, err := os.Lstat(dotI2pd); os.IsNotExist(err) {
-		if err := os.Symlink(configDir, dotI2pd); err != nil {
-			fmt.Fprintf(os.Stderr, "[i2p] warn: .i2pd symlink: %v\n", err)
-		}
-	}
-
 	m := &Manager{configDir: configDir}
-	if err := m.writeI2PDConf(); err != nil {
-		return nil, err
-	}
-	// Always write server tunnel so i2pd creates the destination keyfile.
 	if err := m.writeTunnelsConf(serverPort, nil); err != nil {
 		return nil, err
 	}
+
 	return m, nil
 }
 
@@ -94,39 +72,71 @@ func (m *Manager) Start() error {
 		return err
 	}
 
-	// Preflight: verify datadir is writable before handing off to i2pd.
-	testDir := filepath.Join(m.configDir, ".writetest")
-	if mkErr := os.Mkdir(testDir, 0o700); mkErr != nil {
-		return fmt.Errorf(
-			"i2p: datadir %s is not writable (uid=%d): %w\n"+
-				"  Fix: sudo chown -R $(id -un) %s && sudo chmod -R u+rwX %s",
-			m.configDir, os.Getuid(), mkErr, m.configDir, m.configDir,
-		)
-	}
-	os.Remove(testDir)
 
+	softDir := "/var/lib/junknas"
 	confPath    := filepath.Join(m.configDir, "i2pd.conf")
-	tunnelsPath := filepath.Join(m.configDir, "tunnels.conf")
+	tunnelsPath := filepath.Join(softDir, "tunnels.conf")
+	logPath := filepath.Join(softDir, "i2pd.log")
+	pidPath := "/run/junknas"
+
+
+	// Lookup the "i2pd" user
+	u, err := user.Lookup("i2pd")
+	if err != nil {
+		panic(err)
+	}
+
+	// Convert UID/GID from string → int
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		panic(err)
+	}
+
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		panic(err)
+	}
+
+
+	err = os.Chown(tunnelsPath, uid, gid)
+	if err != nil {
+		panic(err)
+	}
+
+	err = os.Chmod(pidPath, 0755)
+	if err != nil {
+		panic(err)
+	}
+
+	err = os.Chown(pidPath, uid, gid)
+	if err != nil {
+		panic(err)
+	}
+
 
 	m.cmd = exec.Command(i2pdBin,
 		"--conf="+confPath,
 		"--tunconf="+tunnelsPath,
 		"--datadir="+m.configDir,
 		"--log=file",
-		"--logfile="+filepath.Join(m.configDir, "i2pd.log"),
+		"--logfile="+logPath,
 		"--loglevel=warn",
+		"--pidfile="+filepath.Join(pidPath, "i2pd.pid"),
 	)
 
-	// Set HOME so i2pd's $HOME/.i2pd fallback points to our symlink.
-	// Also set I2PD_DATADIR for any future i2pd versions that respect it.
-	homeDir := filepath.Dir(m.configDir)
 	m.cmd.Env = append(os.Environ(),
-		"HOME="+homeDir,
+		"HOME="+filepath.Dir(m.configDir),
 		"I2PD_DATADIR="+m.configDir,
 	)
 
+	m.cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid: uint32(uid),
+			Gid: uint32(gid),
+		},
+	}
+
 	// Pipe stdout+stderr — tee to logfile and scan for readiness.
-	logPath := filepath.Join(m.configDir, "i2pd.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("i2p: open log: %w", err)
@@ -171,10 +181,8 @@ func (m *Manager) Start() error {
 	case <-time.After(startupGrace):
 	}
 
-	// Attempt to resolve B32 — may not be ready yet on first boot.
 	b32, err := pollB32(filepath.Join(m.configDir, "smb-server.dat"), 120*time.Second)
 	if err != nil {
-		// Non-fatal — daemon.retryB32() will keep trying.
 		fmt.Fprintf(os.Stderr, "[i2p] B32 not yet available: %v\n", err)
 		return nil
 	}
@@ -223,49 +231,6 @@ func (m *Manager) ReloadTunnels(smbServerPort int, peers []TunnelPeer) error {
 	return nil
 }
 
-// ── config templates ──────────────────────────────────────────────────────
-
-const i2pdConfTmpl = `# JunkNAS i2pd configuration — auto-generated, do not edit.
-
-[general]
-datadir   = {{.DataDir}}
-tunconf   = {{.TunnelsConf}}
-loglevel  = warn
-logfile   = {{.LogFile}}
-
-[ntcp2]
-enabled = true
-
-[ssu2]
-enabled = true
-
-[http]
-enabled = false
-
-[httpproxy]
-enabled = false
-
-[socksproxy]
-enabled = true
-address  = 127.0.0.1
-port     = 4447
-
-[sam]
-enabled = false
-
-[bob]
-enabled = false
-
-[i2cp]
-enabled = false
-
-[limits]
-transittunnels = 300
-
-[trust]
-enabled = false
-`
-
 const tunnelsConfTmpl = `# JunkNAS tunnel configuration — auto-generated.
 # Hot-reloaded via SIGHUP when peers change.
 # Keys paths are relative so i2pd resolves them against its datadir.
@@ -308,21 +273,9 @@ type tunnelPeerEntry struct {
 	LocalPort int
 }
 
-func (m *Manager) writeI2PDConf() error {
-	tmpl := template.Must(template.New("i2pd").Parse(i2pdConfTmpl))
-	f, err := os.Create(filepath.Join(m.configDir, "i2pd.conf"))
-	if err != nil {
-		return fmt.Errorf("i2p: create i2pd.conf: %w", err)
-	}
-	defer f.Close()
-	return tmpl.Execute(f, i2pdConfData{
-		DataDir:     m.configDir,
-		TunnelsConf: filepath.Join(m.configDir, "tunnels.conf"),
-		LogFile:     filepath.Join(m.configDir, "i2pd.log"),
-	})
-}
 
 func (m *Manager) writeTunnelsConf(serverPort int, peers []TunnelPeer) error {
+	softDir := "/var/lib/junknas"
 	tmpl := template.Must(template.New("tunnels").Parse(tunnelsConfTmpl))
 	data := tunnelsConfData{ServerPort: serverPort}
 	for _, p := range peers {
@@ -332,7 +285,7 @@ func (m *Manager) writeTunnelsConf(serverPort int, peers []TunnelPeer) error {
 			LocalPort: p.LocalPort,
 		})
 	}
-	f, err := os.Create(filepath.Join(m.configDir, "tunnels.conf"))
+	f, err := os.Create(filepath.Join(softDir, "tunnels.conf"))
 	if err != nil {
 		return fmt.Errorf("i2p: create tunnels.conf: %w", err)
 	}
@@ -373,7 +326,5 @@ func findI2PD() (string, error) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf(
-		"i2pd not found — install with: apt install i2pd",
-	)
+	return "", fmt.Errorf("i2pd not found — install with: apt install i2pd")
 }

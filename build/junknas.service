@@ -30,7 +30,7 @@ ExecStartPre=+/bin/bash -c '\
              /mnt/junknas-peers && \
     chmod -R u+rwX /var/lib/junknas'
 
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/junknasd --daemon \
+ExecStart=/usr/local/bin/junknasd --daemon \
     --data=/var/lib/junknas \
     --storage=/var/lib/junknas/storage \
     --smb-user=junknas

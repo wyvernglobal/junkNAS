@@ -72,24 +72,20 @@ ok "Build and install complete → $INSTALL_PREFIX/bin/junknasd"
 # ── Directories ───────────────────────────────────────────────────────────
 info "Creating runtime directories..."
 
-mkdir -p "$DATA_DIR/i2p"
 mkdir -p "$DATA_DIR/smb"
 mkdir -p "$DATA_DIR/storage"
 mkdir -p "$CONFIG_DIR"
 mkdir -p /mnt/junknas
 mkdir -p /mnt/junknas-peers
+mkdir -p /run/junknas
 
 # Give the junknas user full ownership and write access to its entire tree.
 # i2pd creates destinations/, netDb/, addressbook/ etc. inside the i2p
 # datadir at runtime — the whole tree must be writable.
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR" /mnt/junknas /mnt/junknas-peers
-chmod -R u+rwX "$DATA_DIR"
-chmod 755 /mnt/junknas /mnt/junknas-peers
+chmod 755 /mnt/junknas /mnt/junknas-peers "$DATA_DIR"
 
-# Create $HOME/.i2pd symlink so i2pd's HOME-based fallback lookup finds
-# our config directory even if --datadir is ignored by the Debian package.
-ln -sfn "$DATA_DIR/i2p" "$DATA_DIR/.i2pd"
-chown -h "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR/.i2pd"
+# .i2pd is i2pd's native home directory — no symlink needed.
 
 ok "Directories ready"
 
@@ -105,26 +101,6 @@ if [[ ! -f "$CONFIG_DIR/smb.secret" ]]; then
     ok "Password stored in $CONFIG_DIR/smb.secret"
 fi
 
-# ── AppArmor ──────────────────────────────────────────────────────────────
-# The Debian i2pd package ships an AppArmor profile that restricts i2pd to
-# /var/lib/i2pd/ only. We disable it and install a local override that
-# permits our custom datadir. This is required — without it i2pd crashes
-# with EACCES when trying to create destinations/ in our datadir.
-if command -v apparmor_parser &>/dev/null && [ -f /etc/apparmor.d/usr.sbin.i2pd ]; then
-    info "Configuring AppArmor for i2pd..."
-
-    # Install local override that permits our datadir.
-    mkdir -p /etc/apparmor.d/local
-    cp "$SCRIPT_DIR/apparmor/usr.sbin.i2pd.local"        /etc/apparmor.d/local/usr.sbin.i2pd
-    chmod 644 /etc/apparmor.d/local/usr.sbin.i2pd
-
-    # Disable the restrictive base profile.
-    aa-disable /etc/apparmor.d/usr.sbin.i2pd 2>/dev/null || true
-
-    ok "i2pd AppArmor profile disabled (custom datadir permitted)"
-else
-    ok "AppArmor not active or no i2pd profile found — nothing to do"
-fi
 
 # ── Systemd ───────────────────────────────────────────────────────────────
 info "Installing systemd service..."

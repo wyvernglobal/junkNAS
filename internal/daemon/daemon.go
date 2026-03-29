@@ -57,7 +57,7 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: registry: %w", err)
 	}
 
-	i2pMgr, err := i2p.New(filepath.Join(cfg.DataDir, "i2p"), smbPort)
+	i2pMgr, err := i2p.New("/var/lib/i2pd", smbPort)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: i2p: %w", err)
 	}
