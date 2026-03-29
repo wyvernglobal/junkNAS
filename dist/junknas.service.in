@@ -1,0 +1,58 @@
+[Unit]
+Description=JunkNAS Distributed Private Cloud Daemon
+Documentation=https://github.com/junknas/junknas
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=junknas
+Group=junknas
+
+# Runs as root before User= takes effect.
+# 1. Disable the Debian i2pd AppArmor profile — it restricts i2pd to
+#    /var/lib/i2pd/ only, blocking our custom datadir entirely.
+# 2. Fix ownership and create the .i2pd symlink for i2pd's HOME fallback.
+ExecStartPre=+/bin/bash -c '\
+    if command -v aa-disable >/dev/null 2>&1 && \
+       [ -f /etc/apparmor.d/usr.sbin.i2pd ]; then \
+        aa-disable /etc/apparmor.d/usr.sbin.i2pd 2>/dev/null || true; \
+    fi; \
+    mkdir -p /var/lib/junknas/i2p \
+             /var/lib/junknas/smb \
+             /var/lib/junknas/storage \
+             /mnt/junknas \
+             /mnt/junknas-peers && \
+    chown -R junknas:junknas \
+             /var/lib/junknas \
+             /mnt/junknas \
+             /mnt/junknas-peers && \
+    chmod -R u+rwX /var/lib/junknas && \
+    ln -sfn /var/lib/junknas/i2p /var/lib/junknas/.i2pd && \
+    chown -h junknas:junknas /var/lib/junknas/.i2pd'
+
+ExecStart=@CMAKE_INSTALL_PREFIX@/bin/junknasd --daemon \
+    --data=/var/lib/junknas \
+    --storage=/var/lib/junknas/storage \
+    --smb-user=junknas
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+# Set HOME so i2pd's $HOME/.i2pd fallback finds our symlink.
+Environment=HOME=/var/lib/junknas
+Environment=JUNKNAS_SMB_PASS_FILE=/etc/junknas/smb.secret
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=false
+ReadWritePaths=/var/lib/junknas /mnt/junknas /mnt/junknas-peers
+
+# Required for mergerfs FUSE mounts
+AmbientCapabilities=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN
+
+[Install]
+WantedBy=multi-user.target
