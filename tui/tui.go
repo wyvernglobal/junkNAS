@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,6 +34,30 @@ var (
 
 var httpClient = &http.Client{
 	Timeout: 5 * time.Second,
+}
+
+// ── Clipboard utility ──────────────────────────────────────────────────────
+
+// copyToClipboard copies text to the system clipboard using xclip or xsel.
+func copyToClipboard(text string) error {
+	// Try xclip first (most common)
+	if cmd := exec.Command("xclip", "-selection", "clipboard"); cmd != nil {
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+
+	// Fall back to xsel
+	if cmd := exec.Command("xsel", "-b", "-i"); cmd != nil {
+		cmd.Stdin = strings.NewReader(text)
+		if err := cmd.Run(); err == nil {
+			return nil
+		}
+	}
+
+	// If both fail, return error
+	return fmt.Errorf("clipboard tool not available (install xclip or xsel)")
 }
 
 // ── API client ────────────────────────────────────────────────────────────
@@ -365,12 +390,31 @@ func (a *App) showAddNode() {
 
 	modal := newModal(" ◈ Add Node — share with new machine ")
 
-	b32TV := tview.NewTextView().SetDynamicColors(true).
+	// B32 Address as a clickable button
+	b32 := inv.B32
+	b32Btn := tview.NewButton("  📋 Click to copy B32 address  ").
+		SetSelectedFunc(func() {
+			if err := copyToClipboard(b32); err != nil {
+				// If copy fails, just show the address
+				a.showMsg("Notice", "Copied:\n"+b32)
+			} else {
+				a.showMsg("Copied", "B32 address copied to clipboard")
+			}
+		})
+	b32Btn.SetBackgroundColor(colPanel)
+	b32Btn.SetLabelColor(colText)
+
+	b32Display := tview.NewTextView().SetDynamicColors(true).
 		SetText(fmt.Sprintf(
 			"  [%s]B32 Address[-]\n  [%s]%s[-]",
-			hex(colDim), hex(colText), inv.B32,
+			hex(colDim), hex(colAccent), b32,
 		))
-	b32TV.SetBackgroundColor(colPanel)
+	b32Display.SetBackgroundColor(colPanel)
+
+	b32Container := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(b32Display, 3, 0, false).
+		AddItem(b32Btn, 1, 0, true)
+	b32Container.SetBackgroundColor(colPanel)
 
 	phraseRow := tview.NewFlex().SetDirection(tview.FlexColumn)
 	for i, word := range inv.Phrase {
@@ -396,7 +440,7 @@ func (a *App) showAddNode() {
 	doneBtn.SetLabelColor(colBG)
 
 	modal.
-		AddItem(b32TV, 3, 0, false).
+		AddItem(b32Container, 4, 0, false).
 		AddItem(phraseRow, 5, 0, false).
 		AddItem(timerTV, 1, 0, false).
 		AddItem(bgSpacer(), 1, 0, false).
@@ -442,7 +486,7 @@ func (a *App) showJoinCloud() {
 		AddItem(w3, 0, 1, false)
 
 	storeCheck := tview.NewCheckbox().
-		SetLabel("  Store files on this device").
+		SetLabel("  Enable storage mode (contribute disk space)").
 		SetChecked(true).
 		SetFieldBackgroundColor(colBG).
 		SetLabelColor(colText)
@@ -483,13 +527,21 @@ func (a *App) showJoinCloud() {
 			"role":        role,
 			"quota_bytes": qgb * (1 << 30),
 		}
-		var result map[string]string
-		if err := apiPost(a.base, "/v1/connect", payload, &result); err != nil {
-			errTV.SetText(fmt.Sprintf("[%s]⚠ Join failed: %s[-]", hex(colRed), err))
-			return
-		}
-		a.pages.RemovePage("joincloud")
-		a.refreshData()
+		
+		// Run join in background goroutine to avoid freezing UI
+		go func() {
+			var result map[string]string
+			if err := apiPost(a.base, "/v1/connect", payload, &result); err != nil {
+				a.tapp.QueueUpdateDraw(func() {
+					errTV.SetText(fmt.Sprintf("[%s]⚠ Join failed: %s[-]", hex(colRed), err))
+				})
+				return
+			}
+			a.tapp.QueueUpdateDraw(func() {
+				a.pages.RemovePage("joincloud")
+				a.refreshData()
+			})
+		}()
 	})
 	joinBtn.SetBackgroundColor(colAccent)
 	joinBtn.SetLabelColor(colBG)
@@ -514,6 +566,7 @@ func (a *App) showJoinCloud() {
 		AddItem(lbl("Passphrase (3 separate words):"), 1, 0, false).
 		AddItem(phraseRow, 1, 0, false).
 		AddItem(bgSpacer(), 1, 0, false).
+		AddItem(lbl("Storage configuration:"), 1, 0, false).
 		AddItem(storeCheck, 1, 0, false).
 		AddItem(quotaIn, 1, 0, false).
 		AddItem(bgSpacer(), 1, 0, false).
