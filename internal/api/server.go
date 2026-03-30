@@ -99,8 +99,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	// Read the live B32 addresses from the i2p manager.  The keyfiles are
-	// cached after the first successful read so these calls are cheap.
 	apiB32 := s.i2pMgr.APIAddress()
 	smbB32 := s.i2pMgr.SMBAddress()
 
@@ -110,7 +108,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	// Build a view of self with the current live addresses.
 	selfView := *self
 	if apiB32 != "" {
 		selfView.B32 = apiB32
@@ -133,8 +130,6 @@ func (s *Server) handleInvite(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Ensure the invite carries the live API B32 (in case the registry record
-	// still has "pending" from before i2pd finished initialising).
 	if s.i2pMgr != nil {
 		if apiB32 := s.i2pMgr.APIAddress(); apiB32 != "" {
 			inv.B32 = apiB32
@@ -144,10 +139,11 @@ func (s *Server) handleInvite(w http.ResponseWriter, _ *http.Request) {
 }
 
 type ConnectRequest struct {
-	TargetB32  string        `json:"target_b32"`  // API B32 of the target node
-	Phrase     [3]string     `json:"phrase"`
-	Role       registry.Role `json:"role"`
-	QuotaBytes int64         `json:"quota_bytes"`
+	TargetB32    string        `json:"target_b32"`
+	Phrase       [3]string     `json:"phrase"`
+	Role         registry.Role `json:"role"`
+	QuotaBytes   int64         `json:"quota_bytes"`
+	StoragePath  string        `json:"storage_path"`
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -156,21 +152,58 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+
+	// Ensure this node is ready to join (B32 addresses already known)
+	self := s.reg.Self()
+	if self == nil {
+		http.Error(w, "self not initialized", http.StatusServiceUnavailable)
+		return
+	}
+	if self.B32 == "pending" || self.SMBB32 == "pending" {
+		http.Error(w, "node still bootstrapping I2P, please wait a few seconds", http.StatusServiceUnavailable)
+		return
+	}
+
 	phrase, err := words.FromSlice(req.Phrase[:])
 	if err != nil {
 		http.Error(w, "invalid phrase: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// SendJoinRequest expects the target's API B32 so it can POST over SOCKS5.
-	go func() {
-		if _, err := s.proto.SendJoinRequest(req.TargetB32, phrase, req.Role, req.QuotaBytes); err != nil {
+
+	// Synchronously perform the join request over I2P (may take tens of seconds)
+	resp, err := s.proto.SendJoinRequest(req.TargetB32, phrase, req.Role, req.QuotaBytes, req.StoragePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// After successful join, update our own self record with the chosen quota and storage path.
+	updated := false
+	if req.QuotaBytes > 0 && self.QuotaBytes != req.QuotaBytes {
+		self.QuotaBytes = req.QuotaBytes
+		updated = true
+	}
+	if req.StoragePath != "" && self.StoragePath != req.StoragePath {
+		self.StoragePath = req.StoragePath
+		updated = true
+	}
+	if req.Role != self.Role {
+		self.Role = req.Role
+		updated = true
+	}
+	if updated {
+		if err := s.reg.SetSelf(self); err != nil {
+			http.Error(w, "join succeeded but failed to update local config: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if s.onJoin != nil {
+		// If role changed to storage and we have a storage path, trigger daemon to start SMB.
+		if self.Role == registry.RoleStorage && self.StoragePath != "" && s.onJoin != nil {
 			s.onJoin()
 		}
-	}()
-	writeJSON(w, map[string]string{"status": "joining"})
+	}
+
+	// Return the peer list that the joining node received.
+	writeJSON(w, resp)
 }
 
 func (s *Server) handlePeers(w http.ResponseWriter, _ *http.Request) {

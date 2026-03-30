@@ -1,10 +1,3 @@
-// Package smb manages the Samba configuration and smbd process lifecycle.
-//
-// Quota enforcement uses a simple directory with periodic usage checks.
-// The quota is enforced at the mergerfs layer (minfreespace + mfs policy
-// routes writes away from full nodes) and via a background goroutine that
-// sets the Samba share to read-only once the quota is reached.
-// This avoids requiring CAP_SYS_ADMIN / loop devices for a normal service.
 package smb
 
 import (
@@ -61,24 +54,21 @@ const smbConfTmpl = `# JunkNAS Samba configuration — auto-generated. Do not ed
 	force directory mode = 0770
 `
 
-// Config holds the parameters for the Samba manager.
 type Config struct {
 	StoragePath string
-	QuotaBytes  int64  // 0 = unlimited
+	QuotaBytes  int64
 	SambaUser   string
 	SambaPass   string
 	ConfDir     string
 }
 
-// Manager handles smb.conf generation and smbd process lifecycle.
 type Manager struct {
 	cfg      Config
 	confPath string
 	cmd      *exec.Cmd
-	readOnly bool // true when quota is exceeded
+	readOnly bool
 }
 
-// New creates a Samba manager and ensures the storage directory exists.
 func New(cfg Config) (*Manager, error) {
 	if err := os.MkdirAll(cfg.ConfDir, 0o700); err != nil {
 		return nil, fmt.Errorf("smb: mkdir conf: %w", err)
@@ -92,7 +82,6 @@ func New(cfg Config) (*Manager, error) {
 	}, nil
 }
 
-// UsedBytes returns the disk usage of the storage directory in bytes.
 func (m *Manager) UsedBytes() (int64, error) {
 	out, err := exec.Command("du", "-sb", m.cfg.StoragePath).Output()
 	if err != nil {
@@ -103,7 +92,6 @@ func (m *Manager) UsedBytes() (int64, error) {
 	return used, nil
 }
 
-// FreeBytes returns bytes available on the underlying filesystem at StoragePath.
 func (m *Manager) FreeBytes() (int64, error) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(m.cfg.StoragePath, &st); err != nil {
@@ -112,8 +100,6 @@ func (m *Manager) FreeBytes() (int64, error) {
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
 
-// QuotaExceeded returns true if the storage directory has used >= QuotaBytes.
-// Always returns false if QuotaBytes is 0 (unlimited).
 func (m *Manager) QuotaExceeded() bool {
 	if m.cfg.QuotaBytes <= 0 {
 		return false
@@ -125,8 +111,6 @@ func (m *Manager) QuotaExceeded() bool {
 	return used >= m.cfg.QuotaBytes
 }
 
-// QuotaRemaining returns bytes remaining under the quota.
-// Returns -1 if quota is unlimited.
 func (m *Manager) QuotaRemaining() int64 {
 	if m.cfg.QuotaBytes <= 0 {
 		return -1
@@ -142,19 +126,15 @@ func (m *Manager) QuotaRemaining() int64 {
 	return rem
 }
 
-// CheckAndEnforceQuota sets the Samba share read-only if the quota is
-// exceeded, and read-write if it is not. Calls Reload() if the state changed.
-// Call this periodically from the daemon watchdog.
 func (m *Manager) CheckAndEnforceQuota() error {
 	exceeded := m.QuotaExceeded()
 	if exceeded == m.readOnly {
-		return nil // no change
+		return nil
 	}
 	m.readOnly = exceeded
 	return m.Reload()
 }
 
-// WriteConfig (re)generates smb.conf.
 func (m *Manager) WriteConfig() error {
 	tmpl, err := template.New("smb").Parse(smbConfTmpl)
 	if err != nil {
@@ -187,7 +167,6 @@ func (m *Manager) WriteConfig() error {
 	})
 }
 
-// SetPassword creates or updates the Samba password for SambaUser.
 func (m *Manager) SetPassword() error {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -205,7 +184,6 @@ func (m *Manager) SetPassword() error {
 	return nil
 }
 
-// Start writes the config and launches smbd.
 func (m *Manager) Start() error {
 	if err := m.WriteConfig(); err != nil {
 		return err
@@ -224,7 +202,6 @@ func (m *Manager) Start() error {
 	return nil
 }
 
-// Reload sends SIGHUP to smbd so it re-reads smb.conf.
 func (m *Manager) Reload() error {
 	if m.cmd == nil || m.cmd.Process == nil {
 		return fmt.Errorf("smb: smbd not running")
@@ -235,7 +212,6 @@ func (m *Manager) Reload() error {
 	return m.cmd.Process.Signal(syscall.SIGHUP)
 }
 
-// Stop terminates smbd.
 func (m *Manager) Stop() {
 	if m.cmd != nil && m.cmd.Process != nil {
 		_ = m.cmd.Process.Kill()
@@ -243,5 +219,15 @@ func (m *Manager) Stop() {
 	}
 }
 
-// ConfPath returns the path to the generated smb.conf.
 func (m *Manager) ConfPath() string { return m.confPath }
+
+// Cfg returns a copy of the configuration.
+func (m *Manager) Cfg() Config {
+	return m.cfg
+}
+
+// UpdateQuota changes the quota and re‑evaluates read‑only status.
+func (m *Manager) UpdateQuota(quotaBytes int64) {
+	m.cfg.QuotaBytes = quotaBytes
+	m.CheckAndEnforceQuota()
+}

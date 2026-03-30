@@ -25,9 +25,6 @@ const (
 	peerMountBase      = "/mnt/junknas-peers"
 	socks5ReadyTimeout = 3 * time.Minute
 
-	// apiListenAddr must match api/server.go's hardcoded listen address.
-	// The port is also registered with i2p.New so the api-server tunnel
-	// forwards I2P connections to the correct local port.
 	apiListenAddr = "127.0.0.1:36789"
 	apiPort       = 36789
 )
@@ -63,8 +60,6 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: registry: %w", err)
 	}
 
-	// Create the I2P manager with the API port so that the api-server tunnel
-	// in tunnels.conf forwards to the correct local port.
 	i2pMgr, err := i2p.New("/var/lib/i2pd", smbPort, apiPort)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: i2p: %w", err)
@@ -134,7 +129,6 @@ func (d *Daemon) Start() error {
 
 	d.proto.SetHTTPClient(i2p.NewHTTPClient())
 
-	// Update self with the B32 addresses now that i2pd has generated the keys.
 	apiB32 := d.i2pMgr.APIAddress()
 	smbB32 := d.i2pMgr.SMBAddress()
 	if apiB32 != "" {
@@ -159,7 +153,6 @@ func (d *Daemon) Start() error {
 		}
 	}
 
-	// Keep retrying until both B32 addresses are resolved.
 	go d.retryB32()
 
 	if d.smbMgr != nil {
@@ -244,8 +237,6 @@ func (d *Daemon) heartbeat() {
 	}
 }
 
-// retryB32 keeps polling the i2pd keyfiles until both SMB and API B32
-// addresses are available and persisted to the registry.
 func (d *Daemon) retryB32() {
 	for {
 		select {
@@ -258,7 +249,7 @@ func (d *Daemon) retryB32() {
 		smbB32 := d.i2pMgr.SMBAddress()
 
 		if apiB32 == "" {
-			continue // still waiting
+			continue
 		}
 
 		self := d.reg.Self()
@@ -266,7 +257,7 @@ func (d *Daemon) retryB32() {
 			continue
 		}
 		if self.B32 == apiB32 && self.SMBB32 == smbB32 {
-			return // both already up to date
+			return
 		}
 
 		self.B32 = apiB32
@@ -330,16 +321,14 @@ func (d *Daemon) remountPeer(p *registry.Peer) {
 	}
 }
 
-// bootstrapSelf creates the initial self record. B32 addresses are not yet
-// known (i2pd hasn't started); they are filled in by Start() and retryB32().
 func (d *Daemon) bootstrapSelf(role registry.Role) error {
 	phrase, err := words.Generate()
 	if err != nil {
 		return fmt.Errorf("generate phrase: %w", err)
 	}
 	return d.reg.SetSelf(&registry.Self{
-		B32:         "pending", // API B32 — set by Start() once i2pd is ready
-		SMBB32:      "pending", // SMB B32 — set by Start() once i2pd is ready
+		B32:         "pending",
+		SMBB32:      "pending",
 		Phrase:      phrase,
 		PhraseHash:  phrase.Hash(),
 		Role:        role,
@@ -349,14 +338,10 @@ func (d *Daemon) bootstrapSelf(role registry.Role) error {
 	})
 }
 
-// rebuildTunnels rewrites tunnels.conf using each peer's SMB B32 address
-// (not the API B32) as the I2P client tunnel destination.
 func (d *Daemon) rebuildTunnels() error {
 	peers := d.reg.Peers()
 	tPeers := make([]i2p.TunnelPeer, 0, len(peers))
 	for _, p := range peers {
-		// Use SMBB32 for the SMB client tunnel. Fall back to B32 if SMBB32
-		// is empty (e.g. older peer records that predate the split).
 		smbDest := p.SMBB32
 		if smbDest == "" || smbDest == "pending" {
 			smbDest = p.B32
@@ -398,4 +383,49 @@ func (d *Daemon) rebuildMergerfs() error {
 		selfPath = s.StoragePath
 	}
 	return d.mergeMgr.Rebuild(mounts, selfPath)
+}
+
+// UpdateSelf updates the local self record with new quota and storage path.
+// If the role changes to storage and smbMgr is not running, it will be started.
+func (d *Daemon) UpdateSelf(quotaBytes int64, storagePath string) error {
+	self := d.reg.Self()
+	if self == nil {
+		return fmt.Errorf("daemon: self not initialized")
+	}
+	updated := false
+	if quotaBytes > 0 && self.QuotaBytes != quotaBytes {
+		self.QuotaBytes = quotaBytes
+		updated = true
+	}
+	if storagePath != "" && self.StoragePath != storagePath {
+		self.StoragePath = storagePath
+		updated = true
+	}
+	if updated {
+		if err := d.reg.SetSelf(self); err != nil {
+			return err
+		}
+	}
+	// If we are now a storage node and the smb manager isn't running, start it.
+	if self.Role == registry.RoleStorage && d.smbMgr == nil && self.StoragePath != "" {
+		var err error
+		d.smbMgr, err = smb.New(smb.Config{
+			StoragePath: self.StoragePath,
+			QuotaBytes:  self.QuotaBytes,
+			SambaUser:   d.cfg.SambaUser,
+			SambaPass:   d.cfg.SambaPass,
+			ConfDir:     filepath.Join(d.cfg.DataDir, "smb"),
+		})
+		if err != nil {
+			return fmt.Errorf("daemon: smb start: %w", err)
+		}
+		if err := d.smbMgr.Start(); err != nil {
+			return fmt.Errorf("daemon: smb start: %w", err)
+		}
+		log.Println("[daemon] Samba started after role upgrade")
+	} else if d.smbMgr != nil && self.Role == registry.RoleStorage && self.QuotaBytes != d.smbMgr.Cfg().QuotaBytes {
+		// Update quota in smb manager if it changed
+		d.smbMgr.UpdateQuota(self.QuotaBytes)
+	}
+	return nil
 }
