@@ -1,2 +1,0 @@
-/usr/local/bin/junknasd
-/usr/local/lib/systemd/system/junknas.service

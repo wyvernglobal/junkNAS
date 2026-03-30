@@ -1,8 +1,0 @@
-/home/josh/junknas/build/CMakeFiles/junknas_tidy.dir
-/home/josh/junknas/build/CMakeFiles/junknas_daemon.dir
-/home/josh/junknas/build/CMakeFiles/edit_cache.dir
-/home/josh/junknas/build/CMakeFiles/rebuild_cache.dir
-/home/josh/junknas/build/CMakeFiles/list_install_components.dir
-/home/josh/junknas/build/CMakeFiles/install.dir
-/home/josh/junknas/build/CMakeFiles/install/local.dir
-/home/josh/junknas/build/CMakeFiles/install/strip.dir
