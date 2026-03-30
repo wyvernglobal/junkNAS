@@ -35,7 +35,7 @@ const (
 	startupGrace = 15 * time.Second
 
 	// b32Suffix is appended to the base32 hash to form a full destination.
-	b32Suffix = ".b32.i2p"
+	b32Suffix = ".b32.i2p:36789"
 )
 
 // TunnelPeer describes a remote peer needing a client tunnel entry.
@@ -143,7 +143,7 @@ func (m *Manager) Start() error {
 	case <-ready:
 	case <-time.After(startupGrace):
 	}
-	b32, err := pollB32(filepath.Join(softDir, "i2pd", "smb-server.dat"), 120*time.Second)
+	b32, err := pollB32(filepath.Join(softDir, "i2pd", "api-server.dat"), 120*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[i2p] B32 not yet available: %v\n", err)
 		return nil
@@ -170,14 +170,22 @@ func (m *Manager) Stop() {
 // B32Address returns this node's .b32.i2p address, or empty if not yet ready.
 func (m *Manager) B32Address() string {
 	softDir := "/var/lib/junknas"
-	if m.b32 != "" {
-		return m.b32
+	b32, err := b32FromKeyFile(filepath.Join(softDir, "ip2d", "api-server.dat"))
+	if err == nil {
+		m.b32 = b32
 	}
+	return m.b32
+}
+
+// B32Address returns this node's .b32.i2p address, or empty if not yet ready.
+func (m *Manager) SMBAddress() string {
+	softDir := "/var/lib/junknas"
 	b32, err := b32FromKeyFile(filepath.Join(softDir, "ip2d", "smb-server.dat"))
 	if err == nil {
 		m.b32 = b32
 	}
 	return m.b32
+
 }
 
 // ReloadTunnels rewrites tunnels.conf and sends SIGHUP so i2pd picks up

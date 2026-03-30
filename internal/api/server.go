@@ -7,10 +7,10 @@ import (
 	"net/http"
 	"os"
 	"time"
-
 	"github.com/junknas/junknas/internal/join"
 	"github.com/junknas/junknas/internal/registry"
 	"github.com/junknas/junknas/internal/words"
+	"github.com/junknas/junknas/internal/i2p"
 )
 
 type Server struct {
@@ -19,9 +19,10 @@ type Server struct {
 	port     int
 	listener net.Listener
 	onJoin   func()
+	i2p	 *i2p.Manager
 }
 
-func New(reg *registry.Registry, proto *join.Protocol, onJoin func()) (*Server, error) {
+func New(reg *registry.Registry, proto *join.Protocol, i2p *i2p.Manager, onJoin func()) (*Server, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:36789")
 	if err != nil {
 		return nil, fmt.Errorf("api: listen: %w", err)
@@ -29,6 +30,7 @@ func New(reg *registry.Registry, proto *join.Protocol, onJoin func()) (*Server, 
 	return &Server{
 		reg:      reg,
 		proto:    proto,
+		i2p: 	  i2p,
 		port:     l.Addr().(*net.TCPAddr).Port,
 		listener: l,
 		onJoin:   onJoin,
@@ -91,6 +93,13 @@ func (s *Server) handlePeerAnnounce(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	if s.i2p == nil {
+		http.Error(w, "i2p Manager not initialized", http.StatusInternalServerError)
+		return
+	}
+	b32 := s.i2p.SMBAddress()
+	self := s.reg.Self()
+	self.B32 = b32
 	writeJSON(w, map[string]any{
 		"self":          s.reg.Self(),
 		"peers":         s.reg.Peers(),

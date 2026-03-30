@@ -95,7 +95,7 @@ func New(cfg Config) (*Daemon, error) {
 		stopCh:   make(chan struct{}),
 	}
 
-	apiSrv, err := api.New(reg, proto, d.onTopologyChange)
+	apiSrv, err := api.New(reg, proto, i2pMgr, d.onTopologyChange)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: api: %w", err)
 	}
