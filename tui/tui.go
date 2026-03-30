@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -38,36 +40,102 @@ var httpClient = &http.Client{
 
 // ── Clipboard utility ──────────────────────────────────────────────────────
 
-// copyToClipboard copies text to the system clipboard using xclip or xsel.
+// copyToClipboard copies text to the system clipboard.
+// Tries wl-copy (Wayland), xclip, and xsel in order.
 func copyToClipboard(text string) error {
-	// Try xclip first (most common)
-	if cmd := exec.Command("xclip", "-selection", "clipboard"); cmd != nil {
+	tools := [][]string{
+		{"wl-copy"},
+		{"xclip", "-selection", "clipboard"},
+		{"xsel", "-b", "-i"},
+	}
+	for _, args := range tools {
+		path, err := exec.LookPath(args[0])
+		if err != nil {
+			continue
+		}
+		cmd := exec.Command(path, args[1:]...)
 		cmd.Stdin = strings.NewReader(text)
 		if err := cmd.Run(); err == nil {
 			return nil
 		}
 	}
+	return fmt.Errorf("no clipboard tool found (install wl-copy, xclip, or xsel)")
+}
 
-	// Fall back to xsel
-	if cmd := exec.Command("xsel", "-b", "-i"); cmd != nil {
-		cmd.Stdin = strings.NewReader(text)
-		if err := cmd.Run(); err == nil {
-			return nil
-		}
+// ── Disk detection ────────────────────────────────────────────────────────
+
+// DiskInfo describes a mounted filesystem suitable for storage.
+type DiskInfo struct {
+	MountPoint string
+	Device     string
+	FreeBytes  int64
+	TotalBytes int64
+}
+
+// discoverDisks returns writable local filesystems with at least 1 GiB free.
+// It reads /proc/mounts and calls statfs on each mount point.
+func discoverDisks() []DiskInfo {
+	var disks []DiskInfo
+	f, err := os.Open("/proc/mounts")
+	if err != nil {
+		return disks
 	}
+	defer f.Close()
 
-	// If both fail, return error
-	return fmt.Errorf("clipboard tool not available (install xclip or xsel)")
+	skip := map[string]bool{
+		"sysfs": true, "proc": true, "devtmpfs": true, "devpts": true,
+		"tmpfs": true, "cgroup": true, "cgroup2": true, "pstore": true,
+		"bpf": true, "tracefs": true, "debugfs": true, "securityfs": true,
+		"fusectl": true, "hugetlbfs": true, "mqueue": true, "configfs": true,
+		"efivarfs": true, "squashfs": true, "overlay": true, "aufs": true,
+	}
+	seen := map[string]bool{}
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 3 {
+			continue
+		}
+		device, mountPoint, fsType := fields[0], fields[1], fields[2]
+		if skip[fsType] {
+			continue
+		}
+		if seen[mountPoint] {
+			continue
+		}
+		// Skip pseudo-mounts
+		if strings.HasPrefix(device, "none") || strings.HasPrefix(mountPoint, "/sys") ||
+			strings.HasPrefix(mountPoint, "/proc") || strings.HasPrefix(mountPoint, "/dev") ||
+			strings.HasPrefix(mountPoint, "/run") {
+			continue
+		}
+
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(mountPoint, &st); err != nil {
+			continue
+		}
+		free := int64(st.Bavail) * int64(st.Bsize)
+		total := int64(st.Blocks) * int64(st.Bsize)
+		if free < 1<<30 { // less than 1 GiB free — skip
+			continue
+		}
+		seen[mountPoint] = true
+		disks = append(disks, DiskInfo{
+			MountPoint: mountPoint,
+			Device:     device,
+			FreeBytes:  free,
+			TotalBytes: total,
+		})
+	}
+	return disks
 }
 
 // ── API client ────────────────────────────────────────────────────────────
 
 func apiBase() (string, error) {
-	// Prefer /tmp directly — os.TempDir() can return something other than
-	// /tmp when TMPDIR is set, but the daemon always writes to /tmp.
 	lockPath := "/tmp/junknas.lock"
 	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
-		// Fall back to os.TempDir() in case the daemon is on a non-Linux system.
 		lockPath = filepath.Join(os.TempDir(), "junknas.lock")
 	}
 	data, err := os.ReadFile(lockPath)
@@ -106,6 +174,10 @@ func apiPost(base, path string, payload, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		bufio.NewScanner(resp.Body).Scan()
+		return fmt.Errorf("server returned %s", resp.Status)
+	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
@@ -144,10 +216,10 @@ type inviteResp struct {
 
 // App is the JunkNAS terminal UI.
 type App struct {
-	tapp       *tview.Application
-	pages      *tview.Pages
-	base       string
-	status     *statusResp
+	tapp   *tview.Application
+	pages  *tview.Pages
+	base   string
+	status *statusResp
 
 	// Widgets updated on refresh.
 	selfBox    *tview.TextView
@@ -182,16 +254,13 @@ func Run() error {
 		case 'j', 'J':
 			a.showJoinCloud()
 		case 'r', 'R':
-			go a.refreshData()  // Run in goroutine to avoid blocking UI
+			go a.refreshData()
 		case 'q', 'Q':
 			a.tapp.Stop()
 		}
 		return ev
 	})
 
-	// Queue the initial refresh to fire once the event loop is running.
-	// Calling refreshData() before Run() means QueueUpdateDraw has no
-	// event loop to dispatch into — the screen stays blank.
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		a.refreshData()
@@ -210,7 +279,7 @@ func Run() error {
 
 func (a *App) buildDashboard() {
 	header := tview.NewTextView().SetDynamicColors(true).SetText(
-		fmt.Sprintf("[%s] ▓▓ JunkNAS[-]  [%s]Distributed Private Cloud · I2P · SMB3[-]",
+		fmt.Sprintf("[%s]## JunkNAS[-]  [%s]Distributed Private Cloud · I2P · SMB3[-]",
 			hex(colAccent), hex(colDim)),
 	)
 	header.SetBackgroundColor(colBG)
@@ -276,18 +345,17 @@ func (a *App) refreshData() {
 	if err := apiGet(a.base, "/v1/status", &s); err != nil {
 		a.tapp.QueueUpdateDraw(func() {
 			if a.statusBar != nil {
-				a.statusBar.SetText(fmt.Sprintf(" [%s]⚠ Cannot reach daemon: %s[-]", hex(colRed), err))
+				a.statusBar.SetText(fmt.Sprintf(" [%s]! Cannot reach daemon: %s[-]", hex(colRed), err))
 			}
 		})
 		return
 	}
 	a.status = &s
 	a.tapp.QueueUpdateDraw(func() {
-		// Recover from any render panic so the TUI stays alive.
 		defer func() {
 			if r := recover(); r != nil {
 				if a.statusBar != nil {
-					a.statusBar.SetText(fmt.Sprintf(" [%s]⚠ render error: %v[-]", hex(colRed), r))
+					a.statusBar.SetText(fmt.Sprintf(" [%s]! render error: %v[-]", hex(colRed), r))
 				}
 			}
 		}()
@@ -305,9 +373,9 @@ func (a *App) renderSelf(s *statusResp) {
 		return
 	}
 	role := s.Self.Role
-	roleIcon := "📦"
+	roleIcon := "[S]"
 	if role == "leech" {
-		roleIcon = "🪱"
+		roleIcon = "[L]"
 	}
 	b32 := s.Self.B32
 	if len(b32) > 52 {
@@ -351,11 +419,11 @@ func (a *App) renderPeers(peers []peerInfo) {
 		sc, si := statusStyle(p.Status)
 		b32 := p.B32
 		if len(b32) > 22 {
-			b32 = b32[:22] + "…"
+			b32 = b32[:22] + "~"
 		}
-		ri := "L"
+		ri := "[S]"
 		if p.Role == "leech" {
-			ri = "L"
+			ri = "[L]"
 		}
 		ls := "never"
 		if !p.LastSeen.IsZero() {
@@ -388,22 +456,11 @@ func (a *App) showAddNode() {
 		return
 	}
 
-	modal := newModal(" ◈ Add Node — share with new machine ")
+	modal := newModal(" [+] Add Node — share with new machine ")
 
-	// B32 Address as a clickable button
 	b32 := inv.B32
-	b32Btn := tview.NewButton("  📋 Click to copy B32 address  ").
-		SetSelectedFunc(func() {
-			if err := copyToClipboard(b32); err != nil {
-				// If copy fails, just show the address
-				a.showMsg("Notice", "Copied:\n"+b32)
-			} else {
-				a.showMsg("Copied", "B32 address copied to clipboard")
-			}
-		})
-	b32Btn.SetBackgroundColor(colPanel)
-	b32Btn.SetLabelColor(colText)
 
+	// B32 display with copy instruction
 	b32Display := tview.NewTextView().SetDynamicColors(true).
 		SetText(fmt.Sprintf(
 			"  [%s]B32 Address[-]\n  [%s]%s[-]",
@@ -411,9 +468,28 @@ func (a *App) showAddNode() {
 		))
 	b32Display.SetBackgroundColor(colPanel)
 
+	copyStatus := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignCenter)
+	copyStatus.SetBackgroundColor(colPanel)
+
+	copyBtn := tview.NewButton("  [C] Copy B32 to clipboard  ").
+		SetSelectedFunc(func() {
+			if err := copyToClipboard(b32); err != nil {
+				a.tapp.QueueUpdateDraw(func() {
+					copyStatus.SetText(fmt.Sprintf("[%s]Copy failed: %s[-]", hex(colRed), err))
+				})
+			} else {
+				a.tapp.QueueUpdateDraw(func() {
+					copyStatus.SetText(fmt.Sprintf("[%s]Copied to clipboard![-]", hex(colGreen)))
+				})
+			}
+		})
+	copyBtn.SetBackgroundColor(colPanel)
+	copyBtn.SetLabelColor(colAccent)
+
 	b32Container := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(b32Display, 3, 0, false).
-		AddItem(b32Btn, 1, 0, true)
+		AddItem(copyBtn, 1, 0, true).
+		AddItem(copyStatus, 1, 0, false)
 	b32Container.SetBackgroundColor(colPanel)
 
 	phraseRow := tview.NewFlex().SetDirection(tview.FlexColumn)
@@ -440,7 +516,7 @@ func (a *App) showAddNode() {
 	doneBtn.SetLabelColor(colBG)
 
 	modal.
-		AddItem(b32Container, 4, 0, false).
+		AddItem(b32Container, 5, 0, false).
 		AddItem(phraseRow, 5, 0, false).
 		AddItem(timerTV, 1, 0, false).
 		AddItem(bgSpacer(), 1, 0, false).
@@ -452,26 +528,36 @@ func (a *App) showAddNode() {
 			rem := time.Until(deadline)
 			if rem <= 0 {
 				a.tapp.QueueUpdateDraw(func() {
-					timerTV.SetText(fmt.Sprintf("  [%s]⏱ Expired — generate a new invite[-]", hex(colRed)))
+					timerTV.SetText(fmt.Sprintf("  [%s]Timer: Expired — generate a new invite[-]", hex(colRed)))
 				})
 				return
 			}
 			m, s := int(rem.Minutes()), int(rem.Seconds())%60
 			a.tapp.QueueUpdateDraw(func() {
-				timerTV.SetText(fmt.Sprintf("  [%s]⏱ Expires in %02d:%02d[-]", hex(colYellow), m, s))
+				timerTV.SetText(fmt.Sprintf("  [%s]Expires in %02d:%02d[-]", hex(colYellow), m, s))
 			})
 			time.Sleep(time.Second)
 		}
 	}()
 
-	a.pages.AddPage("addnode", centreModal(modal, 70, 18), true, true)
-	a.tapp.SetFocus(doneBtn)
+	a.pages.AddPage("addnode", centreModal(modal, 72, 20), true, true)
+	a.tapp.SetFocus(copyBtn)
 }
 
 // ── Join Cloud modal ──────────────────────────────────────────────────────
 
+// diskQuotaEntry holds per-disk quota state for the join form.
+type diskQuotaEntry struct {
+	disk       DiskInfo
+	quotaGiB   int64 // user-chosen quota in GiB
+	inputField *tview.InputField
+}
+
 func (a *App) showJoinCloud() {
-	modal := newModal(" ◈ Join JunkNAS Cloud ")
+	// Discover disks before building UI
+	disks := discoverDisks()
+
+	modal := newModal(" [>] Join JunkNAS Cloud ")
 
 	b32In := styledField("Paste existing node B32 address")
 	w1 := styledField("Word 1")
@@ -485,17 +571,106 @@ func (a *App) showJoinCloud() {
 		AddItem(bgSpacer(), 2, 0, false).
 		AddItem(w3, 0, 1, false)
 
+	// Storage mode toggle
 	storeCheck := tview.NewCheckbox().
 		SetLabel("  Enable storage mode (contribute disk space)").
-		SetChecked(true).
+		SetChecked(len(disks) > 0).
 		SetFieldBackgroundColor(colBG).
 		SetLabelColor(colText)
 
-	quotaIn := styledField("Storage quota in GB  (e.g. 200)")
-
-	// errTV must be *tview.TextView, not *tview.Box
 	errTV := tview.NewTextView().SetDynamicColors(true)
 	errTV.SetBackgroundColor(colPanel)
+
+	lbl := func(t string) *tview.TextView {
+		v := tview.NewTextView().SetDynamicColors(true).
+			SetText(fmt.Sprintf("[%s]%s[-]", hex(colDim), t))
+		v.SetBackgroundColor(colPanel)
+		return v
+	}
+
+	// ── Per-disk quota section ────────────────────────────────────────────
+	var diskEntries []diskQuotaEntry
+	diskFlex := tview.NewFlex().SetDirection(tview.FlexRow)
+	diskFlex.SetBackgroundColor(colPanel)
+
+	// Header row for disk table
+	diskHeader := tview.NewTextView().SetDynamicColors(true).
+		SetText(fmt.Sprintf(
+			"[%s]%-24s  %-12s  %-12s  %s[-]",
+			hex(colAccent), "Mount Point", "Free", "Total", "Quota (GiB)",
+		))
+	diskHeader.SetBackgroundColor(colPanel)
+
+	if len(disks) == 0 {
+		noDisks := tview.NewTextView().SetDynamicColors(true).
+			SetText(fmt.Sprintf("[%s]No suitable disks found (need >= 1 GiB free)[-]", hex(colYellow)))
+		noDisks.SetBackgroundColor(colPanel)
+		diskFlex.AddItem(noDisks, 1, 0, false)
+	} else {
+		diskFlex.AddItem(diskHeader, 1, 0, false)
+
+		for _, d := range disks {
+			entry := diskQuotaEntry{
+				disk:     d,
+				quotaGiB: d.FreeBytes >> 30, // default = all free space
+			}
+
+			// Each disk gets one row: label + input field
+			row := tview.NewFlex().SetDirection(tview.FlexColumn)
+			row.SetBackgroundColor(colPanel)
+
+			diskLabel := tview.NewTextView().SetDynamicColors(true).SetText(
+				fmt.Sprintf("[%s]%-24s  %-12s  %-12s[-]",
+					hex(colText),
+					truncStr(d.MountPoint, 24),
+					fmtBytes(d.FreeBytes),
+					fmtBytes(d.TotalBytes),
+				),
+			)
+			diskLabel.SetBackgroundColor(colPanel)
+
+			defaultVal := strconv.FormatInt(entry.quotaGiB, 10)
+			qField := tview.NewInputField().
+				SetText(defaultVal).
+				SetFieldWidth(8).
+				SetFieldBackgroundColor(colBG).
+				SetFieldTextColor(colText).
+				SetLabelColor(colDim).
+				SetAcceptanceFunc(tview.InputFieldInteger)
+
+			entry.inputField = qField
+			diskEntries = append(diskEntries, entry)
+
+			row.AddItem(diskLabel, 0, 1, false)
+			row.AddItem(qField, 10, 0, true)
+			diskFlex.AddItem(row, 1, 0, true)
+		}
+	}
+
+	// Wrap disk section in a titled box
+	diskBox := tview.NewFlex().SetDirection(tview.FlexRow)
+	diskBox.SetBorder(true).
+		SetTitle(" Per-Disk Quota Allocation ").
+		SetTitleColor(colAccent).
+		SetBorderColor(colAccent).
+		SetBackgroundColor(colPanel)
+	diskBox.AddItem(diskFlex, 0, 1, len(disks) > 0)
+
+	// Show/hide disk box based on storeCheck
+	updateDiskVisibility := func(checked bool) {
+		// tview doesn't support dynamic hide; we'll grey out the label
+		if checked {
+			diskBox.SetBorderColor(colAccent)
+			diskBox.SetTitle(" Per-Disk Quota Allocation (GiB — edit to adjust) ")
+		} else {
+			diskBox.SetBorderColor(colDim)
+			diskBox.SetTitle(" Per-Disk Quota Allocation (storage mode disabled) ")
+		}
+	}
+	storeCheck.SetChangedFunc(func(checked bool) {
+		updateDiskVisibility(checked)
+	})
+	updateDiskVisibility(len(disks) > 0)
 
 	cancelBtn := tview.NewButton(" Cancel ").SetSelectedFunc(func() {
 		a.pages.RemovePage("joincloud")
@@ -509,39 +684,69 @@ func (a *App) showJoinCloud() {
 		p1 := strings.TrimSpace(w1.GetText())
 		p2 := strings.TrimSpace(w2.GetText())
 		p3 := strings.TrimSpace(w3.GetText())
+
 		if b32 == "" || p1 == "" || p2 == "" || p3 == "" {
-			errTV.SetText(fmt.Sprintf("[%s]⚠ All fields are required.[-]", hex(colRed)))
+			a.tapp.QueueUpdateDraw(func() {
+				errTV.SetText(fmt.Sprintf("[%s]All fields are required.[-]", hex(colRed)))
+			})
 			return
 		}
-		qgb, _ := strconv.ParseInt(strings.TrimSpace(quotaIn.GetText()), 10, 64)
-		if qgb <= 0 {
-			qgb = 100
+
+		// Compute total quota from per-disk entries
+		var totalQuotaBytes int64
+		storagePath := ""
+		if storeCheck.IsChecked() && len(diskEntries) > 0 {
+			// Use the disk with the highest allocated quota as the primary storage path
+			var maxQuota int64
+			for i := range diskEntries {
+				qgb, _ := strconv.ParseInt(strings.TrimSpace(diskEntries[i].inputField.GetText()), 10, 64)
+				if qgb < 0 {
+					qgb = 0
+				}
+				// Cap to available free space
+				maxFree := diskEntries[i].disk.FreeBytes >> 30
+				if qgb > maxFree {
+					qgb = maxFree
+				}
+				diskEntries[i].quotaGiB = qgb
+				totalQuotaBytes += qgb << 30
+				if qgb > maxQuota {
+					maxQuota = qgb
+					storagePath = diskEntries[i].disk.MountPoint + "/junknas"
+				}
+			}
+			if totalQuotaBytes == 0 {
+				a.tapp.QueueUpdateDraw(func() {
+					errTV.SetText(fmt.Sprintf("[%s]Quota must be > 0 GiB on at least one disk.[-]", hex(colRed)))
+				})
+				return
+			}
+		} else if storeCheck.IsChecked() {
+			// No disks detected but storage checked — use a default 100 GiB
+			totalQuotaBytes = 100 << 30
 		}
+
 		role := "leech"
 		if storeCheck.IsChecked() {
 			role = "storage"
 		}
+		if totalQuotaBytes == 0 {
+			totalQuotaBytes = 100 << 30
+		}
+
 		payload := map[string]any{
 			"target_b32":  b32,
 			"phrase":      [3]string{p1, p2, p3},
 			"role":        role,
-			"quota_bytes": qgb * (1 << 30),
+			"quota_bytes": totalQuotaBytes,
 		}
-		
-		// Run join in background goroutine to avoid freezing UI
-		go func() {
-			var result map[string]string
-			if err := apiPost(a.base, "/v1/connect", payload, &result); err != nil {
-				a.tapp.QueueUpdateDraw(func() {
-					errTV.SetText(fmt.Sprintf("[%s]⚠ Join failed: %s[-]", hex(colRed), err))
-				})
-				return
-			}
-			a.tapp.QueueUpdateDraw(func() {
-				a.pages.RemovePage("joincloud")
-				a.refreshData()
-			})
-		}()
+		if storagePath != "" {
+			payload["storage_path"] = storagePath
+		}
+
+		// Close the join modal and open the progress view
+		a.pages.RemovePage("joincloud")
+		a.showJoinProgress(b32, payload)
 	})
 	joinBtn.SetBackgroundColor(colAccent)
 	joinBtn.SetLabelColor(colBG)
@@ -552,12 +757,15 @@ func (a *App) showJoinCloud() {
 		AddItem(joinBtn, 10, 0, false)
 	btnRow.SetBackgroundColor(colPanel)
 
-	lbl := func(t string) *tview.TextView {
-		v := tview.NewTextView().SetDynamicColors(true).
-			SetText(fmt.Sprintf("[%s]%s[-]", hex(colDim), t))
-		v.SetBackgroundColor(colPanel)
-		return v
+	diskBoxHeight := 2 + len(diskEntries) // border + entries
+	if diskBoxHeight < 3 {
+		diskBoxHeight = 3
 	}
+	if diskBoxHeight > 8 {
+		diskBoxHeight = 8
+	}
+
+	totalHeight := 22 + diskBoxHeight
 
 	modal.
 		AddItem(lbl("B32 Address of an existing node:"), 1, 0, false).
@@ -566,15 +774,170 @@ func (a *App) showJoinCloud() {
 		AddItem(lbl("Passphrase (3 separate words):"), 1, 0, false).
 		AddItem(phraseRow, 1, 0, false).
 		AddItem(bgSpacer(), 1, 0, false).
-		AddItem(lbl("Storage configuration:"), 1, 0, false).
 		AddItem(storeCheck, 1, 0, false).
-		AddItem(quotaIn, 1, 0, false).
+		AddItem(bgSpacer(), 1, 0, false).
+		AddItem(diskBox, diskBoxHeight, 0, len(disks) > 0).
 		AddItem(bgSpacer(), 1, 0, false).
 		AddItem(errTV, 1, 0, false).
 		AddItem(btnRow, 1, 0, false)
 
-	a.pages.AddPage("joincloud", centreModal(modal, 72, 22), true, true)
+	a.pages.AddPage("joincloud", centreModal(modal, 78, totalHeight), true, true)
 	a.tapp.SetFocus(b32In)
+}
+
+// ── Join progress view ────────────────────────────────────────────────────
+
+// showJoinProgress replaces the join modal with a live log/progress window.
+// The actual join POST runs in a background goroutine; log lines are
+// appended to the TextView as they arrive.
+func (a *App) showJoinProgress(targetB32 string, payload map[string]any) {
+	modal := newModal(" [>] Joining JunkNAS Cloud — connecting... ")
+
+	logView := tview.NewTextView().
+		SetDynamicColors(true).
+		SetScrollable(true).
+		SetWrap(true)
+	logView.SetBackgroundColor(colPanel)
+
+	statusLine := tview.NewTextView().SetDynamicColors(true)
+	statusLine.SetBackgroundColor(colPanel)
+
+	closeBtn := tview.NewButton(" Close ").SetSelectedFunc(func() {
+		a.pages.RemovePage("joinprogress")
+		a.tapp.SetFocus(a.peersTable)
+		go a.refreshData()
+	})
+	closeBtn.SetBackgroundColor(colDim)
+	closeBtn.SetLabelColor(colBG)
+	closeBtn.SetDisabled(true)
+
+	modal.
+		AddItem(logView, 0, 1, false).
+		AddItem(statusLine, 1, 0, false).
+		AddItem(bgSpacer(), 1, 0, false).
+		AddItem(centreItem(closeBtn, 12), 1, 0, true)
+
+	a.pages.AddPage("joinprogress", centreModal(modal, 78, 26), true, true)
+	a.tapp.SetFocus(logView)
+
+	// appendLog safely appends a timestamped line to the log view.
+	appendLog := func(color tcell.Color, format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		ts := time.Now().Format("15:04:05")
+		line := fmt.Sprintf("[%s]%s[-]  %s\n", hex(colDim), ts, msg)
+		// Colour the message part
+		line = fmt.Sprintf("[%s]%s[-]  [%s]%s[-]\n", hex(colDim), ts, hex(color), msg)
+		a.tapp.QueueUpdateDraw(func() {
+			fmt.Fprint(logView, line)
+			logView.ScrollToEnd()
+		})
+	}
+
+	setStatus := func(color tcell.Color, msg string) {
+		a.tapp.QueueUpdateDraw(func() {
+			statusLine.SetText(fmt.Sprintf(" [%s]%s[-]", hex(color), msg))
+		})
+	}
+
+	enableClose := func() {
+		a.tapp.QueueUpdateDraw(func() {
+			closeBtn.SetDisabled(false)
+			closeBtn.SetBackgroundColor(colAccent)
+			closeBtn.SetLabelColor(colBG)
+			a.tapp.SetFocus(closeBtn)
+		})
+	}
+
+	// Run the join in a background goroutine.
+	go func() {
+		appendLog(colText, "Preparing join request...")
+		appendLog(colDim, "Target: %s", truncStr(targetB32, 52))
+
+		role, _ := payload["role"].(string)
+		appendLog(colDim, "Role: %s", role)
+
+		if qb, ok := payload["quota_bytes"].(int64); ok {
+			appendLog(colDim, "Quota: %s", fmtBytes(qb))
+		}
+
+		appendLog(colText, "Sending join request over I2P...")
+		appendLog(colYellow, "This may take 30-120 seconds while I2P tunnels establish...")
+
+		setStatus(colYellow, "Waiting for response from target node...")
+
+		// Use a longer timeout for the join POST since I2P is slow.
+		joinClient := &http.Client{Timeout: 150 * time.Second}
+		body, _ := json.Marshal(payload)
+		resp, err := joinClient.Post(
+			a.base+"/v1/connect",
+			"application/json",
+			strings.NewReader(string(body)),
+		)
+
+		if err != nil {
+			appendLog(colRed, "Connection failed: %v", err)
+			setStatus(colRed, "Join failed — check that the target node is reachable and I2P is running")
+			enableClose()
+			return
+		}
+		defer resp.Body.Close()
+
+		var result map[string]string
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			appendLog(colYellow, "Response received (could not parse body: %v)", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			appendLog(colRed, "Server returned: %s", resp.Status)
+			setStatus(colRed, fmt.Sprintf("Join rejected: %s", resp.Status))
+			enableClose()
+			return
+		}
+
+		appendLog(colGreen, "Join request accepted by target node.")
+		appendLog(colText, "Waiting for I2P tunnels to be established...")
+
+		// Poll status until we see at least one peer.
+		setStatus(colYellow, "Waiting for peer registration and tunnel setup...")
+		deadline := time.Now().Add(3 * time.Minute)
+		attempt := 0
+		for time.Now().Before(deadline) {
+			time.Sleep(4 * time.Second)
+			attempt++
+
+			var s statusResp
+			if err := apiGet(a.base, "/v1/status", &s); err != nil {
+				appendLog(colYellow, "Checking daemon status... (attempt %d)", attempt)
+				continue
+			}
+
+			if s.PeerCount > 0 {
+				appendLog(colGreen, "Peer registered! %d peer(s) visible.", s.PeerCount)
+				appendLog(colText, "Rebuilding I2P tunnels and mergerfs mount...")
+				time.Sleep(3 * time.Second)
+
+				// Refresh once more to confirm
+				var s2 statusResp
+				_ = apiGet(a.base, "/v1/status", &s2)
+				appendLog(colGreen, "Cloud mount ready. Total peers: %d (%d storage)", s2.PeerCount, s2.StoragePeers)
+				appendLog(colGreen, "Successfully joined the JunkNAS cloud!")
+				setStatus(colGreen, "Joined successfully! Cloud is available at /mnt/junknas")
+				go a.refreshData()
+				enableClose()
+				return
+			}
+
+			if attempt%3 == 0 {
+				appendLog(colDim, "Still waiting for peer to appear... (attempt %d)", attempt)
+			}
+		}
+
+		appendLog(colYellow, "Timed out waiting for peer to appear in registry.")
+		appendLog(colYellow, "The join may have succeeded — check /mnt/junknas and peer list.")
+		setStatus(colYellow, "Join may have succeeded but peer not yet visible — check dashboard")
+		go a.refreshData()
+		enableClose()
+	}()
 }
 
 // ── utility modal ─────────────────────────────────────────────────────────
@@ -636,13 +999,13 @@ func styledField(placeholder string) *tview.InputField {
 func statusStyle(s string) (tcell.Color, string) {
 	switch s {
 	case "healthy":
-		return colGreen, "●"
+		return colGreen, "(+)"
 	case "degraded":
-		return colYellow, "◐"
+		return colYellow, "(~)"
 	case "unreachable":
-		return colRed, "○"
+		return colRed, "(!)"
 	default:
-		return colDim, "◌"
+		return colDim, "(?)"
 	}
 }
 
@@ -675,4 +1038,11 @@ func humanDur(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+func truncStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "~"
 }
