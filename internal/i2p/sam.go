@@ -44,5 +44,5 @@ func b32FromKeyFile(keyFile string) (string, error) {
 
 	hash := sha256.Sum256(data[:destEnd])
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
-	return strings.ToLower(enc.EncodeToString(hash[:])) + b32Suffix, nil
+	return strings.ToLower(enc.EncodeToString(hash[:])) + b32Suffix + ":36789", nil
 }
