@@ -1,17 +1,19 @@
-
 // Package i2p manages the i2pd router subprocess and tunnel configuration.
 // JunkNAS runs i2pd as a child process. All outbound inter-node HTTP traffic
 // is routed through i2pd's SOCKS5 proxy on 127.0.0.1:4447.
 //
+// Two separate I2P server tunnels are created:
 //
+//	smb-server  → forwards I2P connections to 127.0.0.1:445  (Samba)
+//	api-server  → forwards I2P connections to 127.0.0.1:API_PORT (REST API)
 //
-//	i2pd.conf       — main router config (auto-generated)
-//	tunnels.conf    — server + client tunnels (auto-generated, SIGHUP to reload)
-//	i2pd.log        — router log
-//	smb-server.dat  — persistent I2P destination key (written by i2pd)
-//	destinations/   — i2pd runtime state (written by i2pd)
-//	netDb/          — i2pd network database
-//	addressbook/    — i2pd address book
+// Each tunnel gets its own persistent key file and therefore its own unique
+// .b32.i2p address:
+//
+//	SMBB32  — shared with peers so they can build I2P client tunnels to mount
+//	          our Samba share (SAM / client-tunnel mechanism)
+//	APIB32  — shared during invite flow; peers POST join/announce requests
+//	          here via the SOCKS5 proxy
 package i2p
 
 import (
@@ -24,62 +26,64 @@ import (
 	"syscall"
 	"text/template"
 	"time"
-	"encoding/json"
 )
 
 const (
-	// ProxyAddr is the proxy all outbound I2P HTTP goes through.
+	// SOCKS5Addr is the proxy all outbound I2P HTTP traffic goes through.
 	SOCKS5Addr = "127.0.0.1:4447"
 
 	// startupGrace is how long we wait for i2pd to signal readiness via log.
 	startupGrace = 15 * time.Second
 
-	// b32Suffix is appended to the base32 hash to form a full destination.
-	b32Suffix = ".b32.i2p:36789"
+	// b32Suffix is appended to the base32-encoded SHA-256 of the destination.
+	// No port — ports are handled at the call site or by the tunnel config.
+	b32Suffix = ".b32.i2p"
+
+	// softDir is the JunkNAS runtime data directory.
+	softDir = "/var/lib/junknas"
 )
 
 // TunnelPeer describes a remote peer needing a client tunnel entry.
 type TunnelPeer struct {
 	Identity  string // e.g. "apple storm delta"
-	B32       string // e.g. "abc123….b32.i2p"
+	B32       string // peer's SMB .b32.i2p address (smb-server.dat destination)
 	LocalPort int    // localhost port mapped to peer's remote SMB (445)
 }
 
 // Manager owns the i2pd subprocess and generated config files.
 type Manager struct {
 	configDir string
+	apiPort   int // local port of the REST API server
 	cmd       *exec.Cmd
-	b32       string // cached once keyfile is readable
+	smbB32    string // cached SMB B32 address (from smb-server.dat)
+	apiB32    string // cached API B32 address (from api-server.dat)
 }
 
-type LockFile struct {
-	ApiPort int `json:"api_port"`
-}
-
-// New creates a Manager rooted at configDir and writes initial config files.
-// configDir should be <datadir>/.i2pd so i2pd operates in its natural home.
-// serverPort is the local Samba port (445) — writing the server tunnel
-// immediately ensures i2pd generates the destination keyfile on first boot.
-func New(configDir string, serverPort int) (*Manager, error) {
-	m := &Manager{configDir: configDir}
+// New creates a Manager and writes the initial tunnel configuration.
+//
+// configDir is where i2pd.conf lives (passed to i2pd --conf=).
+// serverPort is the local Samba port (typically 445).
+// apiPort is the local REST API port (typically 36789).
+func New(configDir string, serverPort int, apiPort int) (*Manager, error) {
+	m := &Manager{configDir: configDir, apiPort: apiPort}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return nil, fmt.Errorf("i2p: mkdir %s: %w", configDir, err)
+	}
 	if err := m.writeTunnelsConf(serverPort, nil); err != nil {
 		return nil, err
 	}
-
 	return m, nil
 }
 
-// Start launches i2pd and waits up to startupGrace for it to signal readiness.
+// Start launches i2pd and waits up to startupGrace for it to signal readiness,
+// then polls until the keyfiles (and therefore B32 addresses) are available.
 func (m *Manager) Start() error {
 	i2pdBin, err := findI2PD()
 	if err != nil {
 		return err
 	}
 
-
-	softDir := "/var/lib/junknas"
-
-	confPath := filepath.Join(m.configDir	, "i2pd.conf")
+	confPath := filepath.Join(m.configDir, "i2pd.conf")
 	tunnelsPath := filepath.Join(softDir, "tunnels.conf")
 	logPath := filepath.Join(softDir, "i2pd.log")
 	pidPath := filepath.Join(softDir, "i2pd", "i2pd.pid")
@@ -94,12 +98,11 @@ func (m *Manager) Start() error {
 		"--loglevel=warn",
 		"--pidfile="+pidPath,
 	)
-
 	m.cmd.Env = append(os.Environ(),
 		"HOME="+filepath.Dir(m.configDir),
 		"I2PD_DATADIR="+m.configDir,
 	)
-	// Pipe stdout+stderr — tee to logfile and scan for readiness.
+
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("i2p: open log: %w", err)
@@ -114,7 +117,9 @@ func (m *Manager) Start() error {
 	m.cmd.Stderr = pw
 
 	if err := m.cmd.Start(); err != nil {
-		pr.Close(); pw.Close(); logFile.Close()
+		pr.Close()
+		pw.Close()
+		logFile.Close()
 		return fmt.Errorf("i2p: start i2pd: %w", err)
 	}
 	pw.Close()
@@ -143,16 +148,31 @@ func (m *Manager) Start() error {
 	case <-ready:
 	case <-time.After(startupGrace):
 	}
-	b32, err := pollB32(filepath.Join(softDir, "i2pd", "api-server.dat"), 120*time.Second)
+
+	// Poll for API keyfile first — it signals that i2pd has processed the
+	// tunnel config and both keyfiles should now exist.
+	apiKeyFile := filepath.Join(softDir, "i2pd", "api-server.dat")
+	apiB32, err := pollB32(apiKeyFile, 120*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[i2p] B32 not yet available: %v\n", err)
-		return nil
+		fmt.Fprintf(os.Stderr, "[i2p] API B32 not yet available: %v\n", err)
+		return nil // non-fatal; retryB32 in daemon will keep trying
 	}
-	m.b32 = b32
+	m.apiB32 = apiB32
+	fmt.Fprintf(os.Stderr, "[i2p] API B32: %s\n", m.apiB32)
+
+	// SMB keyfile should be ready by the same time.
+	smbKeyFile := filepath.Join(softDir, "i2pd", "smb-server.dat")
+	if smbB32, err := b32FromKeyFile(smbKeyFile); err == nil {
+		m.smbB32 = smbB32
+		fmt.Fprintf(os.Stderr, "[i2p] SMB B32: %s\n", m.smbB32)
+	} else {
+		fmt.Fprintf(os.Stderr, "[i2p] SMB B32 not yet available: %v\n", err)
+	}
+
 	return nil
 }
 
-// Stop sends SIGTERM to i2pd and waits up to 10s before killing.
+// Stop sends SIGTERM to i2pd and waits up to 10 s before killing.
 func (m *Manager) Stop() {
 	if m.cmd == nil || m.cmd.Process == nil {
 		return
@@ -167,29 +187,41 @@ func (m *Manager) Stop() {
 	}
 }
 
-// B32Address returns this node's .b32.i2p address, or empty if not yet ready.
-func (m *Manager) B32Address() string {
-	softDir := "/var/lib/junknas"
-	b32, err := b32FromKeyFile(filepath.Join(softDir, "ip2d", "api-server.dat"))
-	if err == nil {
-		m.b32 = b32
+// SMBAddress returns this node's SMB .b32.i2p address (from smb-server.dat),
+// or an empty string if the keyfile is not yet available.
+// The result is used as the `destination` in peer I2P client tunnel configs.
+func (m *Manager) SMBAddress() string {
+	if m.smbB32 != "" {
+		return m.smbB32
 	}
-	return m.b32
+	b32, err := b32FromKeyFile(filepath.Join(softDir, "i2pd", "smb-server.dat"))
+	if err == nil {
+		m.smbB32 = b32
+	}
+	return m.smbB32
 }
 
-// B32Address returns this node's .b32.i2p address, or empty if not yet ready.
-func (m *Manager) SMBAddress() string {
-	softDir := "/var/lib/junknas"
-	b32, err := b32FromKeyFile(filepath.Join(softDir, "ip2d", "smb-server.dat"))
-	if err == nil {
-		m.b32 = b32
+// APIAddress returns this node's API .b32.i2p address (from api-server.dat),
+// or an empty string if the keyfile is not yet available.
+// This is the address shared in invitations; peers POST to it via SOCKS5.
+func (m *Manager) APIAddress() string {
+	if m.apiB32 != "" {
+		return m.apiB32
 	}
-	return m.b32
+	b32, err := b32FromKeyFile(filepath.Join(softDir, "i2pd", "api-server.dat"))
+	if err == nil {
+		m.apiB32 = b32
+	}
+	return m.apiB32
+}
 
+// B32Address returns the API B32 address (backward-compatible alias for APIAddress).
+func (m *Manager) B32Address() string {
+	return m.APIAddress()
 }
 
 // ReloadTunnels rewrites tunnels.conf and sends SIGHUP so i2pd picks up
-// new/removed peers without restarting.
+// new/removed peers without a full restart.
 func (m *Manager) ReloadTunnels(smbServerPort int, peers []TunnelPeer) error {
 	if err := m.writeTunnelsConf(smbServerPort, peers); err != nil {
 		return err
@@ -202,27 +234,28 @@ func (m *Manager) ReloadTunnels(smbServerPort int, peers []TunnelPeer) error {
 	return nil
 }
 
-
+// ── tunnel config template ────────────────────────────────────────────────
 
 const tunnelsConfTmpl = `# JunkNAS tunnel configuration — auto-generated.
 # Hot-reloaded via SIGHUP when peers change.
-# Keys paths are relative so i2pd resolves them against its datadir.
+# Key paths are relative; i2pd resolves them against its --datadir.
 {{if gt .ServerPort 0}}
 [junknas-smb-server]
-type              = server
-host		  = 127.0.0.1
-port              = {{.ServerPort}}
-keys              = smb-server.dat
+type = server
+host = 127.0.0.1
+port = {{.ServerPort}}
+keys = smb-server.dat
+
 [junknas-api-server]
-type              = http
-host 		  = 127.0.0.1
-port              = {{.ApiPort}}
-keys              = api-server.dat
+type = server
+host = 127.0.0.1
+port = {{.ApiPort}}
+keys = api-server.dat
 {{end}}
 {{range .Peers}}
 [junknas-peer-{{.SafeName}}]
 type            = client
-address         = {{.B32}}
+address         = 127.0.0.1
 port            = {{.LocalPort}}
 destination     = {{.B32}}
 destinationport = 445
@@ -230,57 +263,48 @@ keys            = peer-{{.SafeName}}.dat
 {{end}}
 `
 
-type i2pdConfData struct {
-	DataDir     string
-	TunnelsConf string
-	LogFile     string
-}
-
 type tunnelsConfData struct {
 	ServerPort int
-	ApiPort int
+	ApiPort    int
 	Peers      []tunnelPeerEntry
 }
 
 type tunnelPeerEntry struct {
 	SafeName  string
-	B32       string
+	B32       string // peer's SMB B32 address
 	LocalPort int
 }
 
-
+// writeTunnelsConf (re)generates tunnels.conf from the current peer list.
+// It uses m.apiPort for the API server tunnel — no lock-file dependency.
 func (m *Manager) writeTunnelsConf(serverPort int, peers []TunnelPeer) error {
-	softDir := "/var/lib/junknas"
-
-	file, err := os.ReadFile("/tmp/junknas.lock")
-	if err != nil {
-		fmt.Println("Error reading file:", err)
-		return fmt.Errorf("i2p: create tunnels.conf: %w", err)
-	}
-
-	var lockFile LockFile
-	err = json.Unmarshal(file, &lockFile)
-	if err != nil {
-		fmt.Println("Error unmarshaling JSON:", err)
-		return fmt.Errorf("i2p: create tunnels.conf: %w", err)
+	if err := os.MkdirAll(softDir, 0o750); err != nil {
+		return fmt.Errorf("i2p: mkdir %s: %w", softDir, err)
 	}
 
 	tmpl := template.Must(template.New("tunnels").Parse(tunnelsConfTmpl))
-	data := tunnelsConfData{ServerPort: serverPort, ApiPort: lockFile.ApiPort}
+	data := tunnelsConfData{
+		ServerPort: serverPort,
+		ApiPort:    m.apiPort,
+	}
 	for _, p := range peers {
 		data.Peers = append(data.Peers, tunnelPeerEntry{
 			SafeName:  strings.ReplaceAll(p.Identity, " ", "-"),
-			B32:       p.B32,
+			B32:       p.B32, // SMB B32
 			LocalPort: p.LocalPort,
 		})
 	}
-	f, err2 := os.Create(filepath.Join(softDir, "tunnels.conf"))
-	if err2 != nil {
-		return fmt.Errorf("i2p: create tunnels.conf: %w", err2)
+
+	path := filepath.Join(softDir, "tunnels.conf")
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("i2p: create tunnels.conf: %w", err)
 	}
 	defer f.Close()
 	return tmpl.Execute(f, data)
 }
+
+// ── helpers ───────────────────────────────────────────────────────────────
 
 // pollB32 retries b32FromKeyFile until the keyfile exists or timeout elapses.
 func pollB32(keyFile string, timeout time.Duration) (string, error) {
@@ -302,17 +326,17 @@ func pollB32(keyFile string, timeout time.Duration) (string, error) {
 	return "", fmt.Errorf("keyfile %s not ready after %s", keyFile, timeout)
 }
 
-// findI2PD locates the i2pd binary.
+// findI2PD locates the i2pd binary in PATH and common install locations.
 func findI2PD() (string, error) {
 	if path, err := exec.LookPath("i2pd"); err == nil {
 		return path, nil
 	}
-	for _, c := range []string{
+	for _, candidate := range []string{
 		"/usr/sbin/i2pd", "/usr/local/sbin/i2pd",
 		"/usr/bin/i2pd", "/usr/local/bin/i2pd",
 	} {
-		if _, err := os.Stat(c); err == nil {
-			return c, nil
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
 		}
 	}
 	return "", fmt.Errorf("i2pd not found — install with: apt install i2pd")

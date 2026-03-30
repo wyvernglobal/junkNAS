@@ -7,22 +7,23 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/junknas/junknas/internal/i2p"
 	"github.com/junknas/junknas/internal/join"
 	"github.com/junknas/junknas/internal/registry"
 	"github.com/junknas/junknas/internal/words"
-	"github.com/junknas/junknas/internal/i2p"
 )
 
 type Server struct {
 	reg      *registry.Registry
 	proto    *join.Protocol
+	i2pMgr   *i2p.Manager
 	port     int
 	listener net.Listener
 	onJoin   func()
-	i2p	 *i2p.Manager
 }
 
-func New(reg *registry.Registry, proto *join.Protocol, i2p *i2p.Manager, onJoin func()) (*Server, error) {
+func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJoin func()) (*Server, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:36789")
 	if err != nil {
 		return nil, fmt.Errorf("api: listen: %w", err)
@@ -30,7 +31,7 @@ func New(reg *registry.Registry, proto *join.Protocol, i2p *i2p.Manager, onJoin 
 	return &Server{
 		reg:      reg,
 		proto:    proto,
-		i2p: 	  i2p,
+		i2pMgr:   i2pMgr,
 		port:     l.Addr().(*net.TCPAddr).Port,
 		listener: l,
 		onJoin:   onJoin,
@@ -93,15 +94,33 @@ func (s *Server) handlePeerAnnounce(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	if s.i2p == nil {
-		http.Error(w, "i2p Manager not initialized", http.StatusInternalServerError)
+	if s.i2pMgr == nil {
+		http.Error(w, "i2p manager not initialized", http.StatusInternalServerError)
 		return
 	}
-	b32 := s.i2p.SMBAddress()
+
+	// Read the live B32 addresses from the i2p manager.  The keyfiles are
+	// cached after the first successful read so these calls are cheap.
+	apiB32 := s.i2pMgr.APIAddress()
+	smbB32 := s.i2pMgr.SMBAddress()
+
 	self := s.reg.Self()
-	self.B32 = b32
+	if self == nil {
+		http.Error(w, "self not yet initialized", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Build a view of self with the current live addresses.
+	selfView := *self
+	if apiB32 != "" {
+		selfView.B32 = apiB32
+	}
+	if smbB32 != "" {
+		selfView.SMBB32 = smbB32
+	}
+
 	writeJSON(w, map[string]any{
-		"self":          s.reg.Self(),
+		"self":          selfView,
 		"peers":         s.reg.Peers(),
 		"peer_count":    len(s.reg.Peers()),
 		"storage_peers": len(s.reg.StoragePeers()),
@@ -114,11 +133,18 @@ func (s *Server) handleInvite(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Ensure the invite carries the live API B32 (in case the registry record
+	// still has "pending" from before i2pd finished initialising).
+	if s.i2pMgr != nil {
+		if apiB32 := s.i2pMgr.APIAddress(); apiB32 != "" {
+			inv.B32 = apiB32
+		}
+	}
 	writeJSON(w, inv)
 }
 
 type ConnectRequest struct {
-	TargetB32  string        `json:"target_b32"`
+	TargetB32  string        `json:"target_b32"`  // API B32 of the target node
 	Phrase     [3]string     `json:"phrase"`
 	Role       registry.Role `json:"role"`
 	QuotaBytes int64         `json:"quota_bytes"`
@@ -135,6 +161,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid phrase: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// SendJoinRequest expects the target's API B32 so it can POST over SOCKS5.
 	go func() {
 		if _, err := s.proto.SendJoinRequest(req.TargetB32, phrase, req.Role, req.QuotaBytes); err != nil {
 			return

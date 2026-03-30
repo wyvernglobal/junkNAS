@@ -24,6 +24,12 @@ const (
 	smbPort            = 445
 	peerMountBase      = "/mnt/junknas-peers"
 	socks5ReadyTimeout = 3 * time.Minute
+
+	// apiListenAddr must match api/server.go's hardcoded listen address.
+	// The port is also registered with i2p.New so the api-server tunnel
+	// forwards I2P connections to the correct local port.
+	apiListenAddr = "127.0.0.1:36789"
+	apiPort       = 36789
 )
 
 type Config struct {
@@ -57,7 +63,9 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: registry: %w", err)
 	}
 
-	i2pMgr, err := i2p.New("/var/lib/i2pd", smbPort)
+	// Create the I2P manager with the API port so that the api-server tunnel
+	// in tunnels.conf forwards to the correct local port.
+	i2pMgr, err := i2p.New("/var/lib/i2pd", smbPort, apiPort)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: i2p: %w", err)
 	}
@@ -126,17 +134,32 @@ func (d *Daemon) Start() error {
 
 	d.proto.SetHTTPClient(i2p.NewHTTPClient())
 
-	b32 := d.i2pMgr.B32Address()
-	if b32 != "" {
-		log.Printf("[daemon] B32: %s", b32)
-	} else {
-		log.Println("[daemon] B32 not yet available — will retry")
+	// Update self with the B32 addresses now that i2pd has generated the keys.
+	apiB32 := d.i2pMgr.APIAddress()
+	smbB32 := d.i2pMgr.SMBAddress()
+	if apiB32 != "" {
+		log.Printf("[daemon] API B32: %s", apiB32)
+	}
+	if smbB32 != "" {
+		log.Printf("[daemon] SMB B32: %s", smbB32)
 	}
 
-	if self := d.reg.Self(); self != nil && self.B32 == "pending" && b32 != "" {
-		self.B32 = b32
-		_ = d.reg.SetSelf(self)
+	if self := d.reg.Self(); self != nil {
+		updated := false
+		if apiB32 != "" && self.B32 != apiB32 {
+			self.B32 = apiB32
+			updated = true
+		}
+		if smbB32 != "" && self.SMBB32 != smbB32 {
+			self.SMBB32 = smbB32
+			updated = true
+		}
+		if updated {
+			_ = d.reg.SetSelf(self)
+		}
 	}
+
+	// Keep retrying until both B32 addresses are resolved.
 	go d.retryB32()
 
 	if d.smbMgr != nil {
@@ -149,9 +172,7 @@ func (d *Daemon) Start() error {
 	if err := d.apiSrv.WriteLockFile(); err != nil {
 		log.Printf("[daemon] warn: lock file: %v", err)
 	}
-
-	log.Println("[daemon] Created Lockfile")
-
+	log.Println("[daemon] Created lockfile")
 
 	if err := d.rebuildTunnels(); err != nil {
 		log.Printf("[daemon] warn: initial tunnel rebuild: %v", err)
@@ -163,7 +184,7 @@ func (d *Daemon) Start() error {
 	go d.watchdog()
 	go d.heartbeat()
 
-	log.Printf("[daemon] API on 127.0.0.1:%d", d.apiSrv.Port())
+	log.Printf("[daemon] API on %s", apiListenAddr)
 	return d.apiSrv.Serve()
 }
 
@@ -223,6 +244,8 @@ func (d *Daemon) heartbeat() {
 	}
 }
 
+// retryB32 keeps polling the i2pd keyfiles until both SMB and API B32
+// addresses are available and persisted to the registry.
 func (d *Daemon) retryB32() {
 	for {
 		select {
@@ -230,19 +253,30 @@ func (d *Daemon) retryB32() {
 			return
 		case <-time.After(15 * time.Second):
 		}
-		b32 := d.i2pMgr.B32Address()
-		if b32 == "" {
+
+		apiB32 := d.i2pMgr.APIAddress()
+		smbB32 := d.i2pMgr.SMBAddress()
+
+		if apiB32 == "" {
+			continue // still waiting
+		}
+
+		self := d.reg.Self()
+		if self == nil {
 			continue
 		}
-		self := d.reg.Self()
-		if self == nil || self.B32 == b32 {
-			return
+		if self.B32 == apiB32 && self.SMBB32 == smbB32 {
+			return // both already up to date
 		}
-		self.B32 = b32
+
+		self.B32 = apiB32
+		if smbB32 != "" {
+			self.SMBB32 = smbB32
+		}
 		if err := d.reg.SetSelf(self); err != nil {
-			log.Printf("[daemon] retryB32: %v", err)
+			log.Printf("[daemon] retryB32: persist: %v", err)
 		} else {
-			log.Printf("[daemon] B32 resolved: %s", b32)
+			log.Printf("[daemon] B32 resolved — API: %s  SMB: %s", apiB32, smbB32)
 			return
 		}
 	}
@@ -296,13 +330,16 @@ func (d *Daemon) remountPeer(p *registry.Peer) {
 	}
 }
 
+// bootstrapSelf creates the initial self record. B32 addresses are not yet
+// known (i2pd hasn't started); they are filled in by Start() and retryB32().
 func (d *Daemon) bootstrapSelf(role registry.Role) error {
 	phrase, err := words.Generate()
 	if err != nil {
 		return fmt.Errorf("generate phrase: %w", err)
 	}
 	return d.reg.SetSelf(&registry.Self{
-		B32:         "pending",
+		B32:         "pending", // API B32 — set by Start() once i2pd is ready
+		SMBB32:      "pending", // SMB B32 — set by Start() once i2pd is ready
 		Phrase:      phrase,
 		PhraseHash:  phrase.Hash(),
 		Role:        role,
@@ -312,13 +349,21 @@ func (d *Daemon) bootstrapSelf(role registry.Role) error {
 	})
 }
 
+// rebuildTunnels rewrites tunnels.conf using each peer's SMB B32 address
+// (not the API B32) as the I2P client tunnel destination.
 func (d *Daemon) rebuildTunnels() error {
 	peers := d.reg.Peers()
 	tPeers := make([]i2p.TunnelPeer, 0, len(peers))
 	for _, p := range peers {
+		// Use SMBB32 for the SMB client tunnel. Fall back to B32 if SMBB32
+		// is empty (e.g. older peer records that predate the split).
+		smbDest := p.SMBB32
+		if smbDest == "" || smbDest == "pending" {
+			smbDest = p.B32
+		}
 		tPeers = append(tPeers, i2p.TunnelPeer{
 			Identity:  p.Identity(),
-			B32:       p.B32,
+			B32:       smbDest,
 			LocalPort: p.LocalMountPort,
 		})
 	}

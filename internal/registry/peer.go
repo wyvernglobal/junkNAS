@@ -22,7 +22,16 @@ const (
 
 // Self describes this node's own identity and configuration.
 type Self struct {
-	B32         string    `json:"b32"`
+	// B32 is this node's API I2P destination (.b32.i2p address of the API
+	// server tunnel). This is the address shared with peers so they can POST
+	// join/announce requests to us over SOCKS5.
+	B32 string `json:"b32"`
+
+	// SMBB32 is this node's SMB I2P destination (.b32.i2p address of the SMB
+	// server tunnel). Peers use this address when configuring their I2P client
+	// tunnels to mount our Samba share.
+	SMBB32 string `json:"smb_b32"`
+
 	Phrase      [3]string `json:"phrase"`
 	PhraseHash  string    `json:"phrase_hash"`
 	Role        Role      `json:"role"`
@@ -34,7 +43,15 @@ type Self struct {
 
 // Peer describes a remote node in the mesh.
 type Peer struct {
-	B32            string    `json:"b32"`
+	// B32 is the peer's API I2P destination. HTTP requests (join, announce,
+	// heartbeat) are sent here via the SOCKS5 proxy.
+	B32 string `json:"b32"`
+
+	// SMBB32 is the peer's SMB I2P destination. This is used as the
+	// `destination` in our local I2P client tunnel config so we can mount
+	// the peer's Samba share via the LocalMountPort localhost port.
+	SMBB32 string `json:"smb_b32"`
+
 	Phrase         [3]string `json:"phrase"`
 	PhraseHash     string    `json:"phrase_hash"`
 	Role           Role      `json:"role"`
