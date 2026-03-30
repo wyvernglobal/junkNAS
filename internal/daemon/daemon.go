@@ -150,6 +150,9 @@ func (d *Daemon) Start() error {
 		log.Printf("[daemon] warn: lock file: %v", err)
 	}
 
+	log.Println("[daemon] Created Lockfile")
+
+
 	if err := d.rebuildTunnels(); err != nil {
 		log.Printf("[daemon] warn: initial tunnel rebuild: %v", err)
 	}

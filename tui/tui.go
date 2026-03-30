@@ -217,7 +217,7 @@ func (a *App) buildDashboard() {
 
 	actionBar := tview.NewTextView().SetDynamicColors(true).SetText(
 		fmt.Sprintf(
-			" [%s][A][-] Add Node   [%s][J][-] Join Cloud   [%s][R][-] Refresh   [%s][Q][-] Quit",
+			" [%s][A][-] (A)dd Node   [%s][J][-] (J)oin Cloud   [%s][R][-] (R)efresh   [%s][Q][-] (Q)uit",
 			hex(colAccent), hex(colAccent), hex(colAccent), hex(colDim),
 		),
 	)
@@ -274,9 +274,9 @@ func (a *App) renderSelf(s *statusResp) {
 		return
 	}
 	role := s.Self.Role
-	roleIcon := "💾"
+	roleIcon := "📦"
 	if role == "leech" {
-		roleIcon = "👁 "
+		roleIcon = "🪱"
 	}
 	b32 := s.Self.B32
 	if len(b32) > 52 {
@@ -322,9 +322,9 @@ func (a *App) renderPeers(peers []peerInfo) {
 		if len(b32) > 22 {
 			b32 = b32[:22] + "…"
 		}
-		ri := "💾"
+		ri := "L"
 		if p.Role == "leech" {
-			ri = "👁 "
+			ri = "L"
 		}
 		ls := "never"
 		if !p.LastSeen.IsZero() {

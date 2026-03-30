@@ -1,6 +1,5 @@
 [Unit]
 Description=JunkNAS Distributed Private Cloud Daemon
-Documentation=https://github.com/junknas/junknas
 After=network-online.target
 Wants=network-online.target
 
@@ -9,50 +8,42 @@ Type=simple
 User=junknas
 Group=junknas
 
-# Runs as root before User= takes effect.
-# 1. Disable the Debian i2pd AppArmor profile — it restricts i2pd to
-#    /var/lib/i2pd/ only, blocking our custom datadir entirely.
-# 2. Fix ownership and create the .i2pd symlink for i2pd's HOME fallback.
+# Setup dirs ONCE, as root
 ExecStartPre=+/bin/bash -c '\
-    if command -v aa-disable >/dev/null 2>&1 && \
-       [ -f /etc/apparmor.d/usr.sbin.i2pd ]; then \
-        aa-disable /etc/apparmor.d/usr.sbin.i2pd 2>/dev/null || true; \
-    fi; \
-    mkdir -p /var/lib/junknas/smb \
-             /var/lib/junknas/storage \
+    mkdir -p /var/lib/junknas/{smb,storage,i2pd} \
              /mnt/junknas \
-	     /run/junknas \
              /mnt/junknas-peers && \
     chown -R junknas:junknas \
              /var/lib/junknas \
              /mnt/junknas \
-	     /run/junknas \
-             /mnt/junknas-peers && \
-    chmod -R u+rwX /var/lib/junknas'
+             /mnt/junknas-peers \
+'
 
-ExecStart=@CMAKE_INSTALL_PREFIX@/bin/junknasd --daemon \
+ExecStart=/usr/local/bin/junknasd \
+    --daemon \
     --data=/var/lib/junknas \
     --storage=/var/lib/junknas/storage \
     --smb-user=junknas
 
-ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10
-TimeoutStopSec=30
 
-# Set HOME so i2pd's $HOME/.i2pd fallback finds our symlink.
+# Environment for i2pd fallback
 Environment=HOME=/var/lib/junknas
-Environment=JUNKNAS_SMB_PASS_FILE=/etc/junknas/smb.secret
 
-# Hardening
-NoNewPrivileges=false
+# Allow writes where needed
+ReadWritePaths=/var/lib/junknas /mnt/junknas /mnt/junknas-peers
+
+# Minimal hardening (safe)
+NoNewPrivileges=true
 PrivateTmp=false
+# Required for FUSE
+DeviceAllow=/dev/fuse rw
+CapabilityBoundingSet=CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_ADMIN
+
+# Allow mount syscalls
+PrivateDevices=false
 ProtectSystem=false
-ReadWritePaths=/var/lib/junknas /mnt/junknas /mnt/junknas-peers /run/junknas
-
-# Required for mergerfs FUSE mounts
-AmbientCapabilities=CAP_SYS_ADMIN, CAP_CHOWN
-CapabilityBoundingSet=CAP_SYS_ADMIN, CAP_CHOWN
-
 [Install]
 WantedBy=multi-user.target

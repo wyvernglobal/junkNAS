@@ -1,9 +1,0 @@
-# JunkNAS local AppArmor override for i2pd.
-# Allows i2pd to use a custom datadir when run as the junknas user.
-# Installed to /etc/apparmor.d/local/usr.sbin.i2pd by the JunkNAS installer.
-
-  # JunkNAS custom datadir
-  /var/lib/junknas/i2p/   rw,
-  /var/lib/junknas/i2p/** rw,
-  /var/lib/junknas/.i2pd  rw,
-  /var/lib/junknas/.i2pd/** rw,

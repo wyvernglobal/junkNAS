@@ -1,3 +1,4 @@
+
 // Package i2p manages the i2pd router subprocess and tunnel configuration.
 // JunkNAS runs i2pd as a child process. All outbound inter-node HTTP traffic
 // is routed through i2pd's SOCKS5 proxy on 127.0.0.1:4447.
@@ -18,8 +19,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
-	"strconv"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -74,68 +73,27 @@ func (m *Manager) Start() error {
 
 
 	softDir := "/var/lib/junknas"
-	confPath    := filepath.Join(m.configDir, "i2pd.conf")
+
+	confPath := filepath.Join(m.configDir	, "i2pd.conf")
 	tunnelsPath := filepath.Join(softDir, "tunnels.conf")
 	logPath := filepath.Join(softDir, "i2pd.log")
-	pidPath := "/run/junknas"
-
-
-	// Lookup the "i2pd" user
-	u, err := user.Lookup("i2pd")
-	if err != nil {
-		panic(err)
-	}
-
-	// Convert UID/GID from string → int
-	uid, err := strconv.Atoi(u.Uid)
-	if err != nil {
-		panic(err)
-	}
-
-	gid, err := strconv.Atoi(u.Gid)
-	if err != nil {
-		panic(err)
-	}
-
-
-	err = os.Chown(tunnelsPath, uid, gid)
-	if err != nil {
-		panic(err)
-	}
-
-	err = os.Chmod(pidPath, 0755)
-	if err != nil {
-		panic(err)
-	}
-
-	err = os.Chown(pidPath, uid, gid)
-	if err != nil {
-		panic(err)
-	}
-
+	pidPath := filepath.Join(softDir, "i2pd", "i2pd.pid")
 
 	m.cmd = exec.Command(i2pdBin,
 		"--conf="+confPath,
+		"--certsdir="+filepath.Join(m.configDir, "certificates"),
 		"--tunconf="+tunnelsPath,
-		"--datadir="+m.configDir,
+		"--datadir="+filepath.Join(softDir, "i2pd"),
 		"--log=file",
 		"--logfile="+logPath,
 		"--loglevel=warn",
-		"--pidfile="+filepath.Join(pidPath, "i2pd.pid"),
+		"--pidfile="+pidPath,
 	)
 
 	m.cmd.Env = append(os.Environ(),
 		"HOME="+filepath.Dir(m.configDir),
 		"I2PD_DATADIR="+m.configDir,
 	)
-
-	m.cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: uint32(uid),
-			Gid: uint32(gid),
-		},
-	}
-
 	// Pipe stdout+stderr — tee to logfile and scan for readiness.
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -180,8 +138,7 @@ func (m *Manager) Start() error {
 	case <-ready:
 	case <-time.After(startupGrace):
 	}
-
-	b32, err := pollB32(filepath.Join(m.configDir, "smb-server.dat"), 120*time.Second)
+	b32, err := pollB32(filepath.Join(softDir, "i2pd", "smb-server.dat"), 120*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[i2p] B32 not yet available: %v\n", err)
 		return nil
@@ -207,10 +164,11 @@ func (m *Manager) Stop() {
 
 // B32Address returns this node's .b32.i2p address, or empty if not yet ready.
 func (m *Manager) B32Address() string {
+	softDir := "/var/lib/junknas"
 	if m.b32 != "" {
 		return m.b32
 	}
-	b32, err := b32FromKeyFile(filepath.Join(m.configDir, "smb-server.dat"))
+	b32, err := b32FromKeyFile(filepath.Join(softDir, "ip2d", "smb-server.dat"))
 	if err == nil {
 		m.b32 = b32
 	}

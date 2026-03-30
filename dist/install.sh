@@ -38,18 +38,18 @@ fi
 # ── System user ───────────────────────────────────────────────────────────
 if ! id "$SERVICE_USER" &>/dev/null; then
     info "Creating system user: $SERVICE_USER"
-    # Set home directory to DATA_DIR so i2pd (which falls back to $HOME/.i2pd)
-    # uses our directory rather than its compiled-in /var/lib/i2pd default.
-    useradd --system --home-dir "$DATA_DIR" --no-create-home \
-            --shell /usr/sbin/nologin "$SERVICE_USER"
-    ok "User $SERVICE_USER created with home=$DATA_DIR"
+    useradd --system \
+        --home-dir "$DATA_DIR" \
+        --no-create-home \
+        --shell /usr/sbin/nologin \
+        "$SERVICE_USER"
+    ok "User $SERVICE_USER created"
 else
-    # Update home dir of existing user in case it was created without one.
     usermod --home "$DATA_DIR" "$SERVICE_USER" 2>/dev/null || true
-    ok "User $SERVICE_USER home set to $DATA_DIR"
+    ok "User $SERVICE_USER already exists"
 fi
 
-# ── Go dependencies ───────────────────────────────────────────────────────
+# ── Build ─────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$ROOT_DIR/build"
@@ -57,9 +57,7 @@ BUILD_DIR="$ROOT_DIR/build"
 info "Resolving Go dependencies..."
 cd "$ROOT_DIR"
 go mod tidy
-ok "go mod tidy complete"
 
-# ── Build ─────────────────────────────────────────────────────────────────
 info "Building JunkNAS..."
 mkdir -p "$BUILD_DIR"
 cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
@@ -67,47 +65,96 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
     -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX"
 cmake --build "$BUILD_DIR" --parallel "$(nproc)"
 cmake --install "$BUILD_DIR"
-ok "Build and install complete → $INSTALL_PREFIX/bin/junknasd"
+
+ok "Installed → $INSTALL_PREFIX/bin/junknasd"
 
 # ── Directories ───────────────────────────────────────────────────────────
 info "Creating runtime directories..."
 
-mkdir -p "$DATA_DIR/smb"
-mkdir -p "$DATA_DIR/storage"
+mkdir -p "$DATA_DIR"/{smb,storage,.i2pd}
 mkdir -p "$CONFIG_DIR"
 mkdir -p /mnt/junknas
 mkdir -p /mnt/junknas-peers
-mkdir -p /run/junknas
 
-# Give the junknas user full ownership and write access to its entire tree.
-# i2pd creates destinations/, netDb/, addressbook/ etc. inside the i2p
-# datadir at runtime — the whole tree must be writable.
-chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR" /mnt/junknas /mnt/junknas-peers
-chmod 755 /mnt/junknas /mnt/junknas-peers "$DATA_DIR"
+# Ownership: EVERYTHING belongs to junknas
+chown -R "$SERVICE_USER:$SERVICE_USER" \
+    "$DATA_DIR" \
+    /mnt/junknas \
+    /mnt/junknas-peers
 
-# .i2pd is i2pd's native home directory — no symlink needed.
+# Permissions
+chmod 755 "$DATA_DIR" /mnt/junknas /mnt/junknas-peers
 
 ok "Directories ready"
 
 # ── SMB password ──────────────────────────────────────────────────────────
 if [[ ! -f "$CONFIG_DIR/smb.secret" ]]; then
-    info "Setting Samba password for the '$SERVICE_USER' system account..."
+    info "Setting Samba password for '$SERVICE_USER'..."
     read -rsp "Enter Samba password: " smb_pass; echo
-    read -rsp "Confirm password: "    smb_conf; echo
+    read -rsp "Confirm password: " smb_conf; echo
     [[ "$smb_pass" == "$smb_conf" ]] || error "Passwords do not match"
+
     printf '%s' "$smb_pass" > "$CONFIG_DIR/smb.secret"
     chmod 600 "$CONFIG_DIR/smb.secret"
     chown root:root "$CONFIG_DIR/smb.secret"
-    ok "Password stored in $CONFIG_DIR/smb.secret"
+
+    ok "Password stored"
 fi
 
+# -- APPARMOR --
+# ── AppArmor (i2pd access to JunkNAS datadir) ─────────────────────────────
+info "Configuring AppArmor for i2pd..."
 
+APPARMOR_PROFILE=""
+for p in /etc/apparmor.d/usr.sbin.i2pd /etc/apparmor.d/usr.bin.i2pd; do
+    if [[ -f "$p" ]]; then
+        APPARMOR_PROFILE="$p"
+        break
+    fi
+done
+
+if [[ -n "$APPARMOR_PROFILE" ]]; then
+    RULE="/var/lib/junknas/** rwk,"
+
+    if grep -qF "$RULE" "$APPARMOR_PROFILE"; then
+        ok "AppArmor rule already present"
+    else
+        info "Adding AppArmor rule to $APPARMOR_PROFILE"
+
+        # Insert before final closing brace if possible
+        sed -i "/^}/i \  $RULE" "$APPARMOR_PROFILE"
+
+        ok "Rule added"
+    fi
+
+    info "Reloading AppArmor profile..."
+    apparmor_parser -r "$APPARMOR_PROFILE"
+    ok "AppArmor reloaded"
+else
+    warn "No i2pd AppArmor profile found, skipping"
+fi
+# -- FUSE --
+# ── FUSE config ───────────────────────────────────────────────────────────
+info "Enabling user_allow_other in /etc/fuse.conf..."
+
+if grep -q "^#user_allow_other" /etc/fuse.conf; then
+    sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
+    ok "user_allow_other enabled"
+elif grep -q "^user_allow_other" /etc/fuse.conf; then
+    ok "user_allow_other already enabled"
+else
+    echo "user_allow_other" >> /etc/fuse.conf
+    ok "user_allow_other added"
+fi
 # ── Systemd ───────────────────────────────────────────────────────────────
 info "Installing systemd service..."
+
 cp "$BUILD_DIR/junknas.service" /etc/systemd/system/junknas.service
 chmod 644 /etc/systemd/system/junknas.service
+
 systemctl daemon-reload
 systemctl enable junknas.service
+
 ok "Service installed and enabled"
 
 # ── Done ──────────────────────────────────────────────────────────────────
