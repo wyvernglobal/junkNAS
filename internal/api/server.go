@@ -52,8 +52,8 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /v1/peers", s.handlePeers)
 	return (&http.Server{
 		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		ReadTimeout:  300 * time.Second,
+		WriteTimeout: 300 * time.Second,
 	}).Serve(s.listener)
 }
 

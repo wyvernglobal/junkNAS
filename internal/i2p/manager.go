@@ -24,10 +24,11 @@ import (
 	"syscall"
 	"text/template"
 	"time"
+	"encoding/json"
 )
 
 const (
-	// SOCKS5Addr is the proxy all outbound I2P HTTP goes through.
+	// ProxyAddr is the proxy all outbound I2P HTTP goes through.
 	SOCKS5Addr = "127.0.0.1:4447"
 
 	// startupGrace is how long we wait for i2pd to signal readiness via log.
@@ -49,6 +50,10 @@ type Manager struct {
 	configDir string
 	cmd       *exec.Cmd
 	b32       string // cached once keyfile is readable
+}
+
+type LockFile struct {
+	ApiPort int `json:"api_port"`
 }
 
 // New creates a Manager rooted at configDir and writes initial config files.
@@ -189,19 +194,22 @@ func (m *Manager) ReloadTunnels(smbServerPort int, peers []TunnelPeer) error {
 	return nil
 }
 
+
+
 const tunnelsConfTmpl = `# JunkNAS tunnel configuration — auto-generated.
 # Hot-reloaded via SIGHUP when peers change.
 # Keys paths are relative so i2pd resolves them against its datadir.
 {{if gt .ServerPort 0}}
 [junknas-smb-server]
 type              = server
-host              = 127.0.0.1
+host		  = 127.0.0.1
 port              = {{.ServerPort}}
 keys              = smb-server.dat
-inbound.quantity  = 3
-outbound.quantity = 3
-inbound.length    = 1
-outbound.length   = 1
+[junknas-api-server]
+type              = http
+host 		  = 127.0.0.1
+port              = {{.ApiPort}}
+keys              = api-server.dat
 {{end}}
 {{range .Peers}}
 [junknas-peer-{{.SafeName}}]
@@ -222,6 +230,7 @@ type i2pdConfData struct {
 
 type tunnelsConfData struct {
 	ServerPort int
+	ApiPort int
 	Peers      []tunnelPeerEntry
 }
 
@@ -234,8 +243,22 @@ type tunnelPeerEntry struct {
 
 func (m *Manager) writeTunnelsConf(serverPort int, peers []TunnelPeer) error {
 	softDir := "/var/lib/junknas"
+
+	file, err := os.ReadFile("/tmp/junknas.lock")
+	if err != nil {
+		fmt.Println("Error reading file:", err)
+		return fmt.Errorf("i2p: create tunnels.conf: %w", err)
+	}
+
+	var lockFile LockFile
+	err = json.Unmarshal(file, &lockFile)
+	if err != nil {
+		fmt.Println("Error unmarshaling JSON:", err)
+		return fmt.Errorf("i2p: create tunnels.conf: %w", err)
+	}
+
 	tmpl := template.Must(template.New("tunnels").Parse(tunnelsConfTmpl))
-	data := tunnelsConfData{ServerPort: serverPort}
+	data := tunnelsConfData{ServerPort: serverPort, ApiPort: lockFile.ApiPort}
 	for _, p := range peers {
 		data.Peers = append(data.Peers, tunnelPeerEntry{
 			SafeName:  strings.ReplaceAll(p.Identity, " ", "-"),
@@ -243,9 +266,9 @@ func (m *Manager) writeTunnelsConf(serverPort int, peers []TunnelPeer) error {
 			LocalPort: p.LocalPort,
 		})
 	}
-	f, err := os.Create(filepath.Join(softDir, "tunnels.conf"))
-	if err != nil {
-		return fmt.Errorf("i2p: create tunnels.conf: %w", err)
+	f, err2 := os.Create(filepath.Join(softDir, "tunnels.conf"))
+	if err2 != nil {
+		return fmt.Errorf("i2p: create tunnels.conf: %w", err2)
 	}
 	defer f.Close()
 	return tmpl.Execute(f, data)
