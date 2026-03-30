@@ -29,6 +29,12 @@ var (
 	colDim    = tcell.NewRGBColor(110, 118, 129)
 )
 
+// ── HTTP client with timeout ───────────────────────────────────────────────
+
+var httpClient = &http.Client{
+	Timeout: 5 * time.Second,
+}
+
 // ── API client ────────────────────────────────────────────────────────────
 
 func apiBase() (string, error) {
@@ -59,7 +65,7 @@ func apiBase() (string, error) {
 }
 
 func apiGet(base, path string, out any) error {
-	resp, err := http.Get(base + path)
+	resp, err := httpClient.Get(base + path)
 	if err != nil {
 		return err
 	}
@@ -69,7 +75,7 @@ func apiGet(base, path string, out any) error {
 
 func apiPost(base, path string, payload, out any) error {
 	body, _ := json.Marshal(payload)
-	resp, err := http.Post(base+path, "application/json",
+	resp, err := httpClient.Post(base+path, "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
 		return err
@@ -151,7 +157,7 @@ func Run() error {
 		case 'j', 'J':
 			a.showJoinCloud()
 		case 'r', 'R':
-			a.refreshData()
+			go a.refreshData()  // Run in goroutine to avoid blocking UI
 		case 'q', 'Q':
 			a.tapp.Stop()
 		}
