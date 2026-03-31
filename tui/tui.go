@@ -427,6 +427,13 @@ func (a *App) showAddNode() {
 
 	copyBtn := tview.NewButton("  [C] Copy B32 to clipboard  ").
 		SetSelectedFunc(func() {
+			defer func() {
+				if r := recover(); r != nil {
+					a.tapp.QueueUpdateDraw(func() {
+						copyStatus.SetText(fmt.Sprintf("[%s]Panic: %v[-]", hex(colRed), r))
+					})
+				}
+			}()
 			if err := copyToClipboard(b32); err != nil {
 				a.tapp.QueueUpdateDraw(func() {
 					copyStatus.SetText(fmt.Sprintf("[%s]Copy failed: %s[-]", hex(colRed), err))
@@ -495,7 +502,7 @@ func (a *App) showAddNode() {
 	}()
 
 	a.pages.AddPage("addnode", centreModal(modal, 72, 20), true, true)
-	a.tapp.SetFocus(copyBtn)
+	a.tapp.SetFocus(doneBtn) // focus on Done button instead of copy button
 }
 
 type diskQuotaEntry struct {

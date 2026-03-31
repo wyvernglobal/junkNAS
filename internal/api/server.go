@@ -24,7 +24,7 @@ type Server struct {
 }
 
 func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJoin func()) (*Server, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:36789")
+	l, err := net.Listen("tcp4", ":36789")
 	if err != nil {
 		return nil, fmt.Errorf("api: listen: %w", err)
 	}
@@ -32,7 +32,7 @@ func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJo
 		reg:      reg,
 		proto:    proto,
 		i2pMgr:   i2pMgr,
-		port:     l.Addr().(*net.TCPAddr).Port,
+		port:     36789,
 		listener: l,
 		onJoin:   onJoin,
 	}, nil
@@ -55,8 +55,8 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /v1/peers", s.handlePeers)
 	return (&http.Server{
 		Handler:      mux,
-		ReadTimeout:  300 * time.Second,
-		WriteTimeout: 300 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
 	}).Serve(s.listener)
 }
 

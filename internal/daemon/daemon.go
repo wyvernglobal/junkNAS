@@ -23,7 +23,7 @@ const (
 	heartbeatInterval  = 60 * time.Second
 	smbPort            = 445
 	peerMountBase      = "/mnt/junknas-peers"
-	socks5ReadyTimeout = 3 * time.Minute
+	proxyReadyTimeout = 3 * time.Minute
 
 	apiListenAddr = "127.0.0.1:36789"
 	apiPort       = 36789
@@ -118,16 +118,16 @@ func (d *Daemon) Start() error {
 	if err := d.i2pMgr.Start(); err != nil {
 		return fmt.Errorf("daemon: i2p start: %w", err)
 	}
-	log.Println("[daemon] i2pd started — waiting for SOCKS5 proxy...")
+	log.Println("[daemon] i2pd started — waiting for proxy...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), socks5ReadyTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), proxyReadyTimeout)
 	defer cancel()
-	if err := i2p.WaitForSOCKS5(ctx); err != nil {
-		return fmt.Errorf("daemon: SOCKS5 never came up: %w", err)
+	if err := d.i2pMgr.WaitForProxy(ctx); err != nil {
+		return fmt.Errorf("daemon: proxy never came up: %w", err)
 	}
-	log.Printf("[daemon] SOCKS5 ready on %s", i2p.SOCKS5Addr)
+	log.Printf("[daemon] proxy ready on %s", d.i2pMgr.ProxAddr)
 
-	d.proto.SetHTTPClient(i2p.NewHTTPClient())
+	d.proto.SetHTTPClient(d.i2pMgr.NewHTTPClient())
 
 	apiB32 := d.i2pMgr.APIAddress()
 	smbB32 := d.i2pMgr.SMBAddress()

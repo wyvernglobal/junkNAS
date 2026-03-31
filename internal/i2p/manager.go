@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -29,9 +30,7 @@ import (
 )
 
 const (
-	// SOCKS5Addr is the proxy all outbound I2P HTTP traffic goes through.
-	SOCKS5Addr = "127.0.0.1:4447"
-
+	
 	// startupGrace is how long we wait for i2pd to signal readiness via log.
 	startupGrace = 15 * time.Second
 
@@ -57,6 +56,7 @@ type Manager struct {
 	cmd       *exec.Cmd
 	smbB32    string // cached SMB B32 address (from smb-server.dat)
 	apiB32    string // cached API B32 address (from api-server.dat)
+	ProxAddr  *url.URL
 }
 
 // New creates a Manager and writes the initial tunnel configuration.
@@ -66,6 +66,11 @@ type Manager struct {
 // apiPort is the local REST API port (typically 36789).
 func New(configDir string, serverPort int, apiPort int) (*Manager, error) {
 	m := &Manager{configDir: configDir, apiPort: apiPort}
+	proxAddr,err := url.Parse("socks5h://127.0.0.1:4447")
+	if err != nil {
+		return nil, err
+	}
+	m.ProxAddr = proxAddr
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return nil, fmt.Errorf("i2p: mkdir %s: %w", configDir, err)
 	}
