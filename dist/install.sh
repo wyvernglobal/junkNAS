@@ -80,14 +80,15 @@ mkdir -p /mnt/junknas-peers
 chown -R "$SERVICE_USER:$SERVICE_USER" \
     "$DATA_DIR" \
     /mnt/junknas \
-    /mnt/junknas-peers
+    /mnt/junknas-peers \
+   /etc/i2pd/tunnels.conf\
+   /var/lib/i2pd
 
-chown i2pd:i2pd /var/lib/i2pd
 chmod g+w /var/lib/i2pd
 usermod -aG i2pd junknas
 
 # Permissions
-chmod 755 "$DATA_DIR" /mnt/junknas /mnt/junknas-peers
+chmod 755 "$DATA_DIR" /mnt/junknas /mnt/junknas-peers /var/lib/i2pd
 
 ok "Directories ready"
 
@@ -130,10 +131,11 @@ if [[ -n "$APPARMOR_PROFILE" ]]; then
 
         ok "Rule added"
     fi
-
-    info "Reloading AppArmor profile..."
-    apparmor_parser -r "$APPARMOR_PROFILE"
-    ok "AppArmor reloaded"
+    if [[$(uname -m) != "aarch64"]]; then
+    	info "Reloading AppArmor profile..."
+    	apparmor_parser -r "$APPARMOR_PROFILE"
+   	ok "AppArmor reloaded"
+    fi
 else
     warn "No i2pd AppArmor profile found, skipping"
 fi
