@@ -2,8 +2,8 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
-	"net"
+
+
 	"net/http"
 	"os"
 	"time"
@@ -19,21 +19,15 @@ type Server struct {
 	proto    *join.Protocol
 	i2pMgr   *i2p.Manager
 	port     int
-	listener net.Listener
 	onJoin   func()
 }
 
 func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJoin func()) (*Server, error) {
-	l, err := net.Listen("tcp4", ":6767")
-	if err != nil {
-		return nil, fmt.Errorf("api: listen: %w", err)
-	}
 	return &Server{
 		reg:      reg,
 		proto:    proto,
 		i2pMgr:   i2pMgr,
 		port:     6767,
-		listener: l,
 		onJoin:   onJoin,
 	}, nil
 }
@@ -55,11 +49,11 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /v1/peers", s.handlePeers)
         mux.HandleFunc("GET /v1/test", s.handleTest)
 	return (&http.Server{
-		Addr:	      "localhost:6767",
+		Addr:	      ":6767",
 		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-	}).Serve(s.listener)
+		ReadTimeout:  60 * time.Second,
+		WriteTimeout: 60 * time.Second,
+	}).ListenAndServe()
 }
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
