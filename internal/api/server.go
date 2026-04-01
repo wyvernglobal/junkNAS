@@ -24,7 +24,7 @@ type Server struct {
 }
 
 func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJoin func()) (*Server, error) {
-	l, err := net.Listen("tcp4", ":36789")
+	l, err := net.Listen("tcp4", ":6767")
 	if err != nil {
 		return nil, fmt.Errorf("api: listen: %w", err)
 	}
@@ -32,7 +32,7 @@ func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJo
 		reg:      reg,
 		proto:    proto,
 		i2pMgr:   i2pMgr,
-		port:     36789,
+		port:     6767,
 		listener: l,
 		onJoin:   onJoin,
 	}, nil
@@ -53,7 +53,9 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /v1/invite", s.handleInvite)
 	mux.HandleFunc("POST /v1/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/peers", s.handlePeers)
+        mux.HandleFunc("GET /v1/test", s.handleTest)
 	return (&http.Server{
+		Addr:	      "localhost:6767",
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
@@ -74,7 +76,8 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if s.onJoin != nil {
 		go s.onJoin()
 	}
-	writeJSON(w, resp)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handlePeerAnnounce(w http.ResponseWriter, r *http.Request) {
@@ -115,8 +118,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if smbB32 != "" {
 		selfView.SMBB32 = smbB32
 	}
-
-	writeJSON(w, map[string]any{
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
 		"self":          selfView,
 		"peers":         s.reg.Peers(),
 		"peer_count":    len(s.reg.Peers()),
@@ -135,7 +138,8 @@ func (s *Server) handleInvite(w http.ResponseWriter, _ *http.Request) {
 			inv.B32 = apiB32
 		}
 	}
-	writeJSON(w, inv)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(inv)
 }
 
 type ConnectRequest struct {
@@ -203,14 +207,17 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return the peer list that the joining node received.
-	writeJSON(w, resp)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handlePeers(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, s.reg.Peers())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(s.reg.Peers())
 }
 
-func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+
+func (s *Server) handleTest(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Success \n"))
 }

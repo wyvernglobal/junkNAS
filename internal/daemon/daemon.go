@@ -25,8 +25,8 @@ const (
 	peerMountBase      = "/mnt/junknas-peers"
 	proxyReadyTimeout = 3 * time.Minute
 
-	apiListenAddr = "127.0.0.1:36789"
-	apiPort       = 36789
+	apiListenAddr = "127.0.0.1:6767"
+	apiPort       = 6767
 )
 
 type Config struct {

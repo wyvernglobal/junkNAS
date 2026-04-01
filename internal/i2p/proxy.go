@@ -1,7 +1,7 @@
-// Package i2p — socks.go
+// Package i2p — proxy.go
 //
 // Provides a pre-configured *http.Client that routes all requests through
-// i2pd's proxy on 127.0.0.1:4447. This is the single HTTP client
+// i2pd's proxy on 127.0.0.1:4444. This is the single HTTP client
 // used by every package that needs to reach a peer over I2P.
 //
 // Usage:
@@ -12,12 +12,9 @@ package i2p
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"time"
-
-	"golang.org/x/net/proxy"
 )
 
 const (
@@ -29,27 +26,12 @@ const (
 )
 
 // NewHTTPClient returns an *http.Client whose transport dials all
-// connections through i2pd's Proxy on 127.0.0.1:4447.
+// connections through i2pd's Proxy on 127.0.0.1:4444.
 //
 // The client should be created once at daemon startup and reused.
 func (m *Manager) NewHTTPClient() *http.Client {
-	dialer, err := proxy.FromURL(m.ProxAddr, proxy.Direct)
-	if err != nil {
-		// proxy.Proxy only fails on bad address format — panic is appropriate.
-		panic(fmt.Sprintf("i2p: Proxy dialer: %v", err))
-	}
-
 	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Use the context deadline if it's tighter than dialTimeout.
-			type contextDialer interface {
-				DialContext(ctx context.Context, network, addr string) (net.Conn, error)
-			}
-			if cd, ok := dialer.(contextDialer); ok {
-				return cd.DialContext(ctx, network, addr)
-			}
-			return dialer.Dial(network, addr)
-		},
+		Proxy: http.ProxyURL(m.ProxAddr),
 		// I2P .b32.i2p "hostnames" are resolved by the proxy itself.
 		DisableKeepAlives:   false,
 		MaxIdleConns:        64,

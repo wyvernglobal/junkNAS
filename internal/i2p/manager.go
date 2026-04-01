@@ -66,7 +66,7 @@ type Manager struct {
 // apiPort is the local REST API port (typically 36789).
 func New(configDir string, serverPort int, apiPort int) (*Manager, error) {
 	m := &Manager{configDir: configDir, apiPort: apiPort}
-	proxAddr,err := url.Parse("socks5h://127.0.0.1:4447")
+	proxAddr,err := url.Parse("http://127.0.0.1:4444")
 	if err != nil {
 		return nil, err
 	}
@@ -252,9 +252,10 @@ port = {{.ServerPort}}
 keys = smb-server.dat
 
 [junknas-api-server]
-type = server
+type = http
 host = 127.0.0.1
 port = {{.ApiPort}}
+i2pheaders = false
 keys = api-server.dat
 {{end}}
 {{range .Peers}}

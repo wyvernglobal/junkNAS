@@ -5,7 +5,6 @@ go 1.22
 require (
 	github.com/gdamore/tcell/v2 v2.7.4
 	github.com/rivo/tview v0.0.0-20240625185742-b0a7293b8130
-	golang.org/x/net v0.25.0
 )
 
 require (
