@@ -23,7 +23,8 @@ ExecStart=/usr/local/bin/junknasd \
     --daemon \
     --data=/var/lib/junknas \
     --storage=/var/lib/junknas/storage \
-    --smb-user=junknas
+    --smb-user=junknas && \
+    /usr/bin/i2pd --datadir=/var/lib/i2pd --daemon
 
 Restart=on-failure
 RestartSec=10

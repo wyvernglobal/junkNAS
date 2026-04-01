@@ -80,8 +80,11 @@ mkdir -p /mnt/junknas-peers
 chown -R "$SERVICE_USER:$SERVICE_USER" \
     "$DATA_DIR" \
     /mnt/junknas \
-    /mnt/junknas-peers \
-    /var/lib/i2pd
+    /mnt/junknas-peers
+
+chown i2pd:i2pd /var/lib/i2pd
+chmod g+w /var/lib/i2pd
+usermod -aG i2pd junknas
 
 # Permissions
 chmod 755 "$DATA_DIR" /mnt/junknas /mnt/junknas-peers

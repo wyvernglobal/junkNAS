@@ -48,12 +48,14 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("POST /v1/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/peers", s.handlePeers)
         mux.HandleFunc("GET /v1/test", s.handleTest)
-	return (&http.Server{
+	srv := &http.Server{
 		Addr:	      ":6767",
 		Handler:      mux,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 60 * time.Second,
-	}).ListenAndServe()
+		}
+	srv.SetKeepAlivesEnabled(false)  
+	return srv.ListenAndServe()
 }
 
 func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {

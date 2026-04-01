@@ -106,91 +106,75 @@ func New(_ string, serverPort int, apiPort int) (*Manager, error) {
 //
 // After i2pd starts we wait for the keyfiles to appear and cache the
 // resulting B32 addresses.
+// manager.go
+
 func (m *Manager) Start() error {
-	i2pdBin, err := findI2PD()
-	if err != nil {
-		return err
-	}
+    // Don't spawn i2pd — it's a system service. Just ensure our tunnel
+    // stanzas are in tunnels.conf and reload the running daemon.
+    if err := m.ensureServerTunnels(m.smbPort, m.apiPort); err != nil {
+        return err
+    }
+    if err := m.reloadSystemI2PD(); err != nil {
+        // Non-fatal: maybe it's not a systemd service, log and continue.
+        fmt.Fprintf(os.Stderr, "[i2p] warn: could not signal system i2pd: %v\n", err)
+    }
 
-	m.cmd = exec.Command(i2pdBin,
-		"--datadir="+i2pdDataDir,
-		"--tunconf="+tunnelsConfPath,
-	)
-	m.cmd.Env = append(os.Environ(), "HOME="+i2pdDataDir)
-	m.cmd.Stdout = os.Stdout
-	m.cmd.Stderr = os.Stderr
+    // Wait for the keyfiles — i2pd generates them after processing tunnels.conf.
+    apiKeyFile := filepath.Join(i2pdDataDir, "api-server.dat")
+    apiB32, err := pollB32(apiKeyFile, 120*time.Second)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "[i2p] API B32 not yet available: %v\n", err)
+        return nil // retryB32 goroutine will keep trying
+    }
+    m.apiB32 = apiB32
+    fmt.Fprintf(os.Stderr, "[i2p] API B32: %s\n", m.apiB32)
 
-	if err := m.cmd.Start(); err != nil {
-		return fmt.Errorf("i2p: start i2pd: %w", err)
-	}
-
-	// Give i2pd a moment to write its initial log / router-info so that the
-	// keyfiles are generated.  We also scan stdout/stderr for the ready signal.
-	ready := make(chan struct{}, 1)
-	go func() {
-		pr, pw, err := os.Pipe()
-		if err != nil {
-			return
-		}
-		defer pr.Close()
-		_ = pw
-		scanner := bufio.NewScanner(pr)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.Contains(line, "Bootstrapping complete") ||
-				strings.Contains(line, "Router info saved") ||
-				strings.Contains(line, "Connected") ||
-				strings.Contains(line, "Data directory") {
-				select {
-				case ready <- struct{}{}:
-				default:
-				}
-			}
-		}
-	}()
-
-	select {
-	case <-ready:
-	case <-time.After(startupGrace):
-	}
-
-	// Poll for the API keyfile — its presence confirms that i2pd processed
-	// the tunnels.conf and both server tunnels are active.
-	apiKeyFile := filepath.Join(i2pdDataDir, "api-server.dat")
-	apiB32, err := pollB32(apiKeyFile, 120*time.Second)
-	if err != nil {
-		// Non-fatal: the daemon's retryB32 goroutine will keep trying.
-		fmt.Fprintf(os.Stderr, "[i2p] API B32 not yet available: %v\n", err)
-		return nil
-	}
-	m.apiB32 = apiB32
-	fmt.Fprintf(os.Stderr, "[i2p] API B32: %s\n", m.apiB32)
-
-	smbKeyFile := filepath.Join(i2pdDataDir, "smb-server.dat")
-	if smbB32, err := b32FromKeyFile(smbKeyFile); err == nil {
-		m.smbB32 = smbB32
-		fmt.Fprintf(os.Stderr, "[i2p] SMB B32: %s\n", m.smbB32)
-	} else {
-		fmt.Fprintf(os.Stderr, "[i2p] SMB B32 not yet available: %v\n", err)
-	}
-
-	return nil
+    smbKeyFile := filepath.Join(i2pdDataDir, "smb-server.dat")
+    if smbB32, err := b32FromKeyFile(smbKeyFile); err == nil {
+        m.smbB32 = smbB32
+        fmt.Fprintf(os.Stderr, "[i2p] SMB B32: %s\n", m.smbB32)
+    }
+    return nil
 }
 
-// Stop sends SIGTERM to i2pd and waits up to 10 s before killing.
 func (m *Manager) Stop() {
-	if m.cmd == nil || m.cmd.Process == nil {
-		return
-	}
-	_ = m.cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan error, 1)
-	go func() { done <- m.cmd.Wait() }()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		_ = m.cmd.Process.Kill()
-	}
+    // We don't own i2pd — don't kill it.
+    // Optionally remove our peer tunnel stanzas and reload.
+    _ = m.rewritePeerTunnels(nil)
+    _ = m.reloadSystemI2PD()
 }
+
+// reloadSystemI2PD sends SIGHUP to the running system i2pd process.
+func (m *Manager) reloadSystemI2PD() error {
+    // Try PID file first (most reliable).
+    for _, pidFile := range []string{
+        "/run/i2pd/i2pd.pid",
+        "/var/run/i2pd/i2pd.pid",
+        "/tmp/i2pd.pid",
+    } {
+        if data, err := os.ReadFile(pidFile); err == nil {
+            var pid int
+            if _, err := fmt.Sscan(strings.TrimSpace(string(data)), &pid); err == nil && pid > 0 {
+                proc, err := os.FindProcess(pid)
+                if err == nil {
+                    if err := proc.Signal(syscall.SIGHUP); err == nil {
+                        fmt.Fprintf(os.Stderr, "[i2p] sent SIGHUP to system i2pd (pid %d)\n", pid)
+                        return nil
+                    }
+                }
+            }
+        }
+    }
+    // Fall back to pkill.
+    cmd := exec.Command("pkill", "-HUP", "i2pd")
+    if out, err := cmd.CombinedOutput(); err != nil {
+        return fmt.Errorf("pkill -HUP i2pd: %w — %s", err, out)
+    }
+    fmt.Fprintf(os.Stderr, "[i2p] sent SIGHUP to system i2pd via pkill\n")
+    return nil
+}
+
+
 
 // SMBAddress returns this node's SMB .b32.i2p address (from smb-server.dat),
 // or an empty string if the keyfile is not yet available.
@@ -230,20 +214,14 @@ func (m *Manager) B32Address() string {
 // The two JunkNAS server stanzas are re-ensured on every call so that a
 // manual edit that removed them is self-healed.
 func (m *Manager) ReloadTunnels(smbServerPort int, peers []TunnelPeer) error {
-	if err := m.ensureServerTunnels(smbServerPort, m.apiPort); err != nil {
-		return err
-	}
-	if err := m.rewritePeerTunnels(peers); err != nil {
-		return err
-	}
-	if m.cmd != nil && m.cmd.Process != nil {
-		if err := m.cmd.Process.Signal(syscall.SIGHUP); err != nil {
-			return fmt.Errorf("i2p: SIGHUP: %w", err)
-		}
-	}
-	return nil
+    if err := m.ensureServerTunnels(smbServerPort, m.apiPort); err != nil {
+        return err
+    }
+    if err := m.rewritePeerTunnels(peers); err != nil {
+        return err
+    }
+    return m.reloadSystemI2PD() // <-- was: m.cmd.Process.Signal(syscall.SIGHUP)
 }
-
 // ── tunnel config helpers ─────────────────────────────────────────────────
 
 // ensureServerTunnels reads the existing tunnels.conf and appends the

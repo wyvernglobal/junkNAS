@@ -33,7 +33,7 @@ func (m *Manager) NewHTTPClient() *http.Client {
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(m.ProxAddr),
 		// I2P .b32.i2p "hostnames" are resolved by the proxy itself.
-		DisableKeepAlives:   false,
+		DisableKeepAlives:   true,
 		MaxIdleConns:        64,
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     90 * time.Second,
