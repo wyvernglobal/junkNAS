@@ -34,7 +34,7 @@ const smbConfTmpl = `# JunkNAS Samba configuration — auto-generated. Do not ed
 	restrict anonymous = 2
 
 	# Performance tweaks for high-latency links
-	socket options = TCP_NODELAY IPTOS_LOWLATENCY SO_RCVBUF=131072 SO_SNDBUF=131072
+	socket options = TCP_NODELAY SO_RCVBUF=131072 SO_SNDBUF=131072
 	read raw = yes
 	write raw = yes
 	max xmit = 65535

@@ -114,10 +114,10 @@ func (m *Manager) Start() error {
     if err := m.ensureServerTunnels(m.smbPort, m.apiPort); err != nil {
         return err
     }
-    if err := m.reloadSystemI2PD(); err != nil {
+  //  if err := m.reloadSystemI2PD(); err != nil {
         // Non-fatal: maybe it's not a systemd service, log and continue.
-        fmt.Fprintf(os.Stderr, "[i2p] warn: could not signal system i2pd: %v\n", err)
-    }
+  //      fmt.Fprintf(os.Stderr, "[i2p] warn: could not signal system i2pd: %v\n", err)
+ //   }
 
     // Wait for the keyfiles — i2pd generates them after processing tunnels.conf.
     apiKeyFile := filepath.Join(i2pdDataDir, "api-server.dat")

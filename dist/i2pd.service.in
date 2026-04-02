@@ -1,0 +1,19 @@
+[Unit]
+Description=I2pd systemd service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/bin/i2pd --datadir=/var/lib/i2pd
+
+Restart=on-failure
+RestartSec=10
+
+
+
+[Install]
+WantedBy=multi-user.target

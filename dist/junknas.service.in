@@ -1,12 +1,13 @@
 [Unit]
 Description=JunkNAS Distributed Private Cloud Daemon
-After=network-online.target
+After=network-online.target i2pd.service
 Wants=network-online.target
+Requires=i2pd.service
 
 [Service]
 Type=simple
-User=junknas
-Group=junknas
+User=root
+Group=root
 
 # Setup dirs ONCE, as root
 ExecStartPre=+/bin/bash -c '\
@@ -19,33 +20,17 @@ ExecStartPre=+/bin/bash -c '\
              /mnt/junknas-peers \
 '
 
-ExecStart=/usr/local/bin/junknasd \
-    --daemon \
-    --data=/var/lib/junknas \
-    --storage=/var/lib/junknas/storage \
-    --smb-user=junknas
+ExecStart=/var/lib/junknas/startup.sh
 
-ExecStart = /usr/bin/i2pd --datadir=/var/lib/i2pd --daemon
-
-Restart=on-failure
-RestartSec=10
-
-# Environment for i2pd fallback
-Environment=HOME=/var/lib/junknas
+Environment=HOME=/root
 
 # Allow writes where needed
-ReadWritePaths=/var/lib/junknas /mnt/junknas /mnt/junknas-peers
+ReadWritePaths=/var/lib/junknas /mnt/junknas /mnt/junknas-peers /var/lib/i2pd
 
-# Minimal hardening (safe)
-NoNewPrivileges=true
 PrivateTmp=false
-# Required for FUSE
 DeviceAllow=/dev/fuse rw
-CapabilityBoundingSet=CAP_SYS_ADMIN
-AmbientCapabilities=CAP_SYS_ADMIN
-
-# Allow mount syscalls
 PrivateDevices=false
 ProtectSystem=false
+
 [Install]
 WantedBy=multi-user.target

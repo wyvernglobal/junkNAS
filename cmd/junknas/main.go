@@ -31,11 +31,13 @@ func main() {
 		daemonOnly = flag.Bool("daemon", false, "Run daemon only — no UI (for systemd)")
 		tuiOnly    = flag.Bool("tui-only", false, "TUI only — connect to an existing daemon")
 		dataDir    = flag.String("data", defaultDataDir(), "Data/state directory")
-		storage    = flag.String("storage", "", "Storage path (empty = leech mode)")
-		quotaGB    = flag.Int64("quota", 100, "Storage quota in GiB")
-		smbUser    = flag.String("smb-user", "junknas", "Samba username")
-		smbPass    = flag.String("smb-pass", "", "Samba password (or set JUNKNAS_SMB_PASS)")
-		version    = flag.Bool("version", false, "Print version and exit")
+		storage    = flag.String("storage", "", "Storage path (empty = leech mode, default)")
+		// Quota has no built-in default: the operator must choose an appropriate
+		// value for their disk.  A value of 0 means leech / no quota enforced.
+		quotaGB = flag.Int64("quota", 0, "Storage quota in GiB (0 = leech / unlimited)")
+		smbUser = flag.String("smb-user", "junknas", "Samba username")
+		smbPass = flag.String("smb-pass", "", "Samba password (or set JUNKNAS_SMB_PASS)")
+		version = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
 

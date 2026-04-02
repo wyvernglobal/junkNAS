@@ -89,6 +89,15 @@ install(FILES ${CMAKE_BINARY_DIR}/junknas.service
     DESTINATION lib/systemd/system
     OPTIONAL
 )
+configure_file(
+    ${CMAKE_SOURCE_DIR}/dist/i2pd.service.in
+    ${CMAKE_BINARY_DIR}/i2pd.service
+    @ONLY
+)
+install(FILES ${CMAKE_BINARY_DIR}/i2pd.service
+    DESTINATION lib/systemd/system
+    OPTIONAL
+)
 
 # ── Summary ────────────────────────────────────────────────────────────────
 message(STATUS "")

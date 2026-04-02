@@ -14,6 +14,9 @@ error() { echo -e "\033[31m[ERR ]\033[0m  $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || error "Run as root: sudo bash install.sh"
 
+cp startup.sh /var/lib/junknas/
+chmod +x /var/lib/junknas/startup.sh
+
 # ── Dependencies ──────────────────────────────────────────────────────────
 info "Checking dependencies..."
 MISSING=()
@@ -76,6 +79,7 @@ mkdir -p "$CONFIG_DIR"
 mkdir -p /mnt/junknas
 mkdir -p /mnt/junknas-peers
 
+
 # Ownership: EVERYTHING belongs to junknas
 chown -R "$SERVICE_USER:$SERVICE_USER" \
     "$DATA_DIR" \
@@ -131,7 +135,7 @@ if [[ -n "$APPARMOR_PROFILE" ]]; then
 
         ok "Rule added"
     fi
-    if [[$(uname -m) != "aarch64"]]; then
+    if [ "$(uname -m)" != "aarch64" ]; then
     	info "Reloading AppArmor profile..."
     	apparmor_parser -r "$APPARMOR_PROFILE"
    	ok "AppArmor reloaded"
@@ -157,9 +161,13 @@ info "Installing systemd service..."
 
 cp "$BUILD_DIR/junknas.service" /etc/systemd/system/junknas.service
 chmod 644 /etc/systemd/system/junknas.service
+cp "$BUILD_DIR/i2pd.service" /etc/systemd/system/i2pd.service
+chmod 644 /etc/systemd/system/i2pd.service
 
 systemctl daemon-reload
 systemctl enable junknas.service
+systemctl enable --now i2pd.service
+systemctl disable --now smbd
 
 ok "Service installed and enabled"
 

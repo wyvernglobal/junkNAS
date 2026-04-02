@@ -502,7 +502,7 @@ func (a *App) showAddNode() {
 	}()
 
 	a.pages.AddPage("addnode", centreModal(modal, 72, 20), true, true)
-	a.tapp.SetFocus(doneBtn) // focus on Done button instead of copy button
+	a.tapp.SetFocus(doneBtn)
 }
 
 type diskQuotaEntry struct {
@@ -528,9 +528,10 @@ func (a *App) showJoinCloud() {
 		AddItem(bgSpacer(), 2, 0, false).
 		AddItem(w3, 0, 1, false)
 
+	// ── Storage mode checkbox — OFF by default (leech is default) ─────────
 	storeCheck := tview.NewCheckbox().
 		SetLabel("  Enable storage mode (contribute disk space)").
-		SetChecked(len(disks) > 0).
+		SetChecked(false). // leech by default
 		SetFieldBackgroundColor(colBG).
 		SetLabelColor(colText)
 
@@ -581,8 +582,8 @@ func (a *App) showJoinCloud() {
 			qField := tview.NewInputField().
 				SetText(defaultVal).
 				SetFieldWidth(8).
-				SetFieldBackgroundColor(colBG).
-				SetFieldTextColor(colText).
+				SetFieldBackgroundColor(colPanel). // greyed out initially
+				SetFieldTextColor(colDim).         // greyed out initially
 				SetLabelColor(colDim).
 				SetAcceptanceFunc(tview.InputFieldInteger)
 
@@ -590,18 +591,18 @@ func (a *App) showJoinCloud() {
 			diskEntries = append(diskEntries, entry)
 
 			row.AddItem(diskLabel, 0, 1, false)
-			row.AddItem(qField, 10, 0, true)
-			diskFlex.AddItem(row, 1, 0, true)
+			row.AddItem(qField, 10, 0, false) // not focusable until enabled
+			diskFlex.AddItem(row, 1, 0, false)
 		}
 	}
 
 	diskBox := tview.NewFlex().SetDirection(tview.FlexRow)
 	diskBox.SetBorder(true).
-		SetTitle(" Per-Disk Quota Allocation ").
-		SetTitleColor(colAccent).
-		SetBorderColor(colAccent).
+		SetTitle(" Per-Disk Quota Allocation (storage mode disabled) ").
+		SetTitleColor(colDim).
+		SetBorderColor(colDim). // greyed out initially
 		SetBackgroundColor(colPanel)
-	diskBox.AddItem(diskFlex, 0, 1, len(disks) > 0)
+	diskBox.AddItem(diskFlex, 0, 1, false)
 
 	diskBoxHeight := 2 + len(diskEntries)
 	if diskBoxHeight > 15 {
@@ -609,22 +610,44 @@ func (a *App) showJoinCloud() {
 	}
 	totalHeight := 22 + diskBoxHeight
 
+	// setDiskFieldsEnabled toggles the visual and interactive state of each
+	// quota input field based on whether storage mode is active.
+	setDiskFieldsEnabled := func(enabled bool) {
+		for i := range diskEntries {
+			if enabled {
+				diskEntries[i].inputField.
+					SetFieldBackgroundColor(colBG).
+					SetFieldTextColor(colText)
+			} else {
+				diskEntries[i].inputField.
+					SetFieldBackgroundColor(colPanel).
+					SetFieldTextColor(colDim)
+			}
+		}
+	}
+
 	updateDiskVisibility := func(checked bool) {
 		if checked {
 			diskBox.SetBorderColor(colAccent)
+			diskBox.SetTitleColor(colAccent)
 			diskBox.SetTitle(" Per-Disk Quota Allocation (GiB — edit to adjust) ")
+			setDiskFieldsEnabled(true)
 		} else {
 			diskBox.SetBorderColor(colDim)
+			diskBox.SetTitleColor(colDim)
 			diskBox.SetTitle(" Per-Disk Quota Allocation (storage mode disabled) ")
+			setDiskFieldsEnabled(false)
 		}
 	}
+
 	storeCheck.SetChangedFunc(func(checked bool) {
 		updateDiskVisibility(checked)
 		if checked && len(diskEntries) > 0 {
 			a.tapp.SetFocus(diskEntries[0].inputField)
 		}
 	})
-	updateDiskVisibility(len(disks) > 0)
+	// Apply initial greyed-out state (storage mode is off by default).
+	updateDiskVisibility(false)
 
 	cancelBtn := tview.NewButton(" Cancel ").SetSelectedFunc(func() {
 		a.pages.RemovePage("joincloud")
@@ -648,40 +671,45 @@ func (a *App) showJoinCloud() {
 
 		var totalQuotaBytes int64
 		storagePath := ""
-		if storeCheck.IsChecked() && len(diskEntries) > 0 {
-			var maxQuota int64
-			for i := range diskEntries {
-				qgb, _ := strconv.ParseInt(strings.TrimSpace(diskEntries[i].inputField.GetText()), 10, 64)
-				if qgb < 0 {
-					qgb = 0
+
+		if storeCheck.IsChecked() {
+			if len(diskEntries) > 0 {
+				var maxQuota int64
+				for i := range diskEntries {
+					qgb, _ := strconv.ParseInt(strings.TrimSpace(diskEntries[i].inputField.GetText()), 10, 64)
+					if qgb < 0 {
+						qgb = 0
+					}
+					maxFree := diskEntries[i].disk.FreeBytes >> 30
+					if qgb > maxFree {
+						qgb = maxFree
+					}
+					diskEntries[i].quotaGiB = qgb
+					totalQuotaBytes += qgb << 30
+					if qgb > maxQuota {
+						maxQuota = qgb
+						storagePath = diskEntries[i].disk.MountPoint + "/junknas"
+					}
 				}
-				maxFree := diskEntries[i].disk.FreeBytes >> 30
-				if qgb > maxFree {
-					qgb = maxFree
+				if totalQuotaBytes == 0 {
+					a.tapp.QueueUpdateDraw(func() {
+						errTV.SetText(fmt.Sprintf("[%s]Quota must be > 0 GiB on at least one disk.[-]", hex(colRed)))
+					})
+					return
 				}
-				diskEntries[i].quotaGiB = qgb
-				totalQuotaBytes += qgb << 30
-				if qgb > maxQuota {
-					maxQuota = qgb
-					storagePath = diskEntries[i].disk.MountPoint + "/junknas"
-				}
-			}
-			if totalQuotaBytes == 0 {
+			} else {
+				// Storage mode checked but no disks discovered — block join.
 				a.tapp.QueueUpdateDraw(func() {
-					errTV.SetText(fmt.Sprintf("[%s]Quota must be > 0 GiB on at least one disk.[-]", hex(colRed)))
+					errTV.SetText(fmt.Sprintf("[%s]No suitable disks found. Uncheck storage mode to join as leech.[-]", hex(colRed)))
 				})
 				return
 			}
-		} else if storeCheck.IsChecked() {
-			totalQuotaBytes = 100 << 30
 		}
+		// If storage mode is off, totalQuotaBytes stays 0 and role is leech.
 
 		role := "leech"
 		if storeCheck.IsChecked() {
 			role = "storage"
-		}
-		if totalQuotaBytes == 0 {
-			totalQuotaBytes = 100 << 30
 		}
 
 		payload := map[string]any{
@@ -715,7 +743,7 @@ func (a *App) showJoinCloud() {
 		AddItem(bgSpacer(), 1, 0, false).
 		AddItem(storeCheck, 1, 0, false).
 		AddItem(bgSpacer(), 1, 0, false).
-		AddItem(diskBox, diskBoxHeight, 0, len(disks) > 0).
+		AddItem(diskBox, diskBoxHeight, 0, false). // not focusable until storage enabled
 		AddItem(bgSpacer(), 1, 0, false).
 		AddItem(errTV, 1, 0, false).
 		AddItem(btnRow, 1, 0, false)
@@ -782,7 +810,7 @@ func (a *App) showJoinProgress(targetB32 string, payload map[string]any) {
 		appendLog(colDim, "Target: %s", truncStr(targetB32, 52))
 		role, _ := payload["role"].(string)
 		appendLog(colDim, "Role: %s", role)
-		if qb, ok := payload["quota_bytes"].(int64); ok {
+		if qb, ok := payload["quota_bytes"].(int64); ok && qb > 0 {
 			appendLog(colDim, "Quota: %s", fmtBytes(qb))
 		}
 		appendLog(colText, "Sending join request over I2P...")
