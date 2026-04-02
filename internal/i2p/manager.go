@@ -27,7 +27,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -144,33 +143,18 @@ func (m *Manager) Stop() {
     _ = m.reloadSystemI2PD()
 }
 
-// reloadSystemI2PD sends SIGHUP to the running system i2pd process.
 func (m *Manager) reloadSystemI2PD() error {
-    // Try PID file first (most reliable).
-    for _, pidFile := range []string{
-        "/run/i2pd/i2pd.pid",
-        "/var/run/i2pd/i2pd.pid",
-        "/tmp/i2pd.pid",
-    } {
-        if data, err := os.ReadFile(pidFile); err == nil {
-            var pid int
-            if _, err := fmt.Sscan(strings.TrimSpace(string(data)), &pid); err == nil && pid > 0 {
-                proc, err := os.FindProcess(pid)
-                if err == nil {
-                    if err := proc.Signal(syscall.SIGHUP); err == nil {
-                        fmt.Fprintf(os.Stderr, "[i2p] sent SIGHUP to system i2pd (pid %d)\n", pid)
-                        return nil
-                    }
-                }
-            }
-        }
+    // Use systemctl to restart i2pd, this is hacky as all hell, i hate hate hate it
+    // but if I do it via ANY other proccess like SIGHUP or only
+    // do 1 pkill it drops the bind to the Go server port.
+    cmd := exec.Command("sudo", "pkill", "i2pd")
+    cmd := exec.Command("sudo", "pkill", "i2pd")
+    cmd := exec.Command("sudo", "systemctl", "restart", "i2pd")
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        return fmt.Errorf("systemctl restart i2pd: %w — %s", err, out)
     }
-    // Fall back to pkill.
-    cmd := exec.Command("pkill", "-HUP", "i2pd")
-    if out, err := cmd.CombinedOutput(); err != nil {
-        return fmt.Errorf("pkill -HUP i2pd: %w — %s", err, out)
-    }
-    fmt.Fprintf(os.Stderr, "[i2p] sent SIGHUP to system i2pd via pkill\n")
+    fmt.Fprintf(os.Stderr, "[i2p] restarted system i2pd via systemctl\n")
     return nil
 }
 
@@ -220,7 +204,7 @@ func (m *Manager) ReloadTunnels(smbServerPort int, peers []TunnelPeer) error {
     if err := m.rewritePeerTunnels(peers); err != nil {
         return err
     }
-    return m.reloadSystemI2PD() // <-- was: m.cmd.Process.Signal(syscall.SIGHUP)
+    return nil//m.reloadSystemI2PD() // <-- was: m.cmd.Process.Signal(syscall.SIGHUP)
 }
 // ── tunnel config helpers ─────────────────────────────────────────────────
 
@@ -236,7 +220,7 @@ func (m *Manager) ensureServerTunnels(smbPort, apiPort int) error {
 			smbServerSection, smbPort)
 	}
 	if !strings.Contains(content, apiServerSection) {
-		fmt.Fprintf(&buf, "\n%s\ntype = http\nhost = 127.0.0.1\nport = %d\ni2pheaders = false\nkeys = api-server.dat\n",
+		fmt.Fprintf(&buf, "\n%s\ntype = server\nhost = 127.0.0.1\nport = %d\nkeys = api-server.dat\n",
 			apiServerSection, apiPort)
 	}
 	if buf.Len() == 0 {

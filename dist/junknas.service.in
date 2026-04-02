@@ -1,8 +1,7 @@
 [Unit]
 Description=JunkNAS Distributed Private Cloud Daemon
-After=network-online.target i2pd.service
+After=network-online.target 
 Wants=network-online.target
-Requires=i2pd.service
 
 [Service]
 Type=simple
