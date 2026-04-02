@@ -14,6 +14,7 @@ error() { echo -e "\033[31m[ERR ]\033[0m  $*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || error "Run as root: sudo bash install.sh"
 
+mkdir -p "$DATA_DIR"/{smb,storage,.i2pd}
 cp startup.sh /var/lib/junknas/
 chmod +x /var/lib/junknas/startup.sh
 
@@ -74,7 +75,6 @@ ok "Installed → $INSTALL_PREFIX/bin/junknasd"
 # ── Directories ───────────────────────────────────────────────────────────
 info "Creating runtime directories..."
 
-mkdir -p "$DATA_DIR"/{smb,storage,.i2pd}
 mkdir -p "$CONFIG_DIR"
 mkdir -p /mnt/junknas
 mkdir -p /mnt/junknas-peers
