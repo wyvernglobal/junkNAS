@@ -688,7 +688,7 @@ func (a *App) showJoinCloud() {
 					totalQuotaBytes += qgb << 30
 					if qgb > maxQuota {
 						maxQuota = qgb
-						storagePath = diskEntries[i].disk.MountPoint + "/junknas"
+						storagePath = diskEntries[i].disk.MountPoint + ".junknas"
 					}
 				}
 				if totalQuotaBytes == 0 {
