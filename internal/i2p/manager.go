@@ -147,9 +147,7 @@ func (m *Manager) reloadSystemI2PD() error {
     // Use systemctl to restart i2pd, this is hacky as all hell, i hate hate hate it
     // but if I do it via ANY other proccess like SIGHUP or only
     // do 1 pkill it drops the bind to the Go server port.
-    cmd := exec.Command("sudo", "pkill", "i2pd")
-    cmd := exec.Command("sudo", "pkill", "i2pd")
-    cmd := exec.Command("sudo", "systemctl", "restart", "i2pd")
+    cmd := exec.Command("sudo", "pkill", "i2pd", "&&", "sudo", "pkill", "i2pd", "&&", "sudo", "systemctl", "restart", "i2pd")
     out, err := cmd.CombinedOutput()
     if err != nil {
         return fmt.Errorf("systemctl restart i2pd: %w — %s", err, out)
