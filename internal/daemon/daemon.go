@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/junknas/junknas/internal/api"
@@ -19,14 +20,22 @@ import (
 )
 
 const (
-	watchdogInterval   = 30 * time.Second
-	heartbeatInterval  = 60 * time.Second
-	smbPort            = 445
-	peerMountBase      = "/mnt/junknas-peers"
+	watchdogInterval  = 30 * time.Second
+	heartbeatInterval = 60 * time.Second
+	smbPort           = 445
+	peerMountBase     = "/mnt/junknas-peers"
 	proxyReadyTimeout = 3 * time.Minute
 
 	apiListenAddr = "127.0.0.1:6767"
 	apiPort       = 6767
+
+	// How long to wait after reloading i2pd tunnels before attempting CIFS mounts.
+	// I2P needs time to negotiate the new tunnel even after the config reload.
+	tunnelEstablishWait = 20 * time.Second
+	// How many times to retry a CIFS mount before giving up.
+	mountRetries = 3
+	// Delay between mount retries.
+	mountRetryDelay = 20 * time.Second
 )
 
 type Config struct {
@@ -69,6 +78,10 @@ func New(cfg Config) (*Daemon, error) {
 	role := registry.RoleLeech
 	if cfg.StoragePath != "" {
 		role = registry.RoleStorage
+		// Ensure the storage directory exists before starting Samba.
+		if err := os.MkdirAll(cfg.StoragePath, 0o750); err != nil {
+			return nil, fmt.Errorf("daemon: mkdir storage %s: %w", cfg.StoragePath, err)
+		}
 		smbMgr, err = smb.New(smb.Config{
 			StoragePath: cfg.StoragePath,
 			QuotaBytes:  cfg.QuotaBytes,
@@ -192,18 +205,55 @@ func (d *Daemon) Stop() {
 	d.i2pMgr.Stop()
 }
 
+// onTopologyChange is called whenever a peer joins or is announced.
+// It starts SMB if we've become a storage node, rebuilds I2P tunnels,
+// then asynchronously waits for tunnels to establish before mounting peers
+// and rebuilding the mergerfs union.
 func (d *Daemon) onTopologyChange() {
 	log.Println("[daemon] topology changed — rebuilding")
+
+	// If this node is now a storage node but SMB isn't running yet
+	// (e.g. we just completed a join with --storage), start it now.
+	if self := d.reg.Self(); self != nil && self.Role == registry.RoleStorage && d.smbMgr == nil && self.StoragePath != "" {
+		log.Printf("[daemon] storage node with no SMB manager — starting Samba for %s", self.StoragePath)
+		if err := os.MkdirAll(self.StoragePath, 0o750); err != nil {
+			log.Printf("[daemon] mkdir storage %s: %v", self.StoragePath, err)
+		}
+		mgr, err := smb.New(smb.Config{
+			StoragePath: self.StoragePath,
+			QuotaBytes:  self.QuotaBytes,
+			SambaUser:   d.cfg.SambaUser,
+			SambaPass:   d.cfg.SambaPass,
+			ConfDir:     filepath.Join(d.cfg.DataDir, "smb"),
+		})
+		if err != nil {
+			log.Printf("[daemon] smb init: %v", err)
+		} else if err := mgr.Start(); err != nil {
+			log.Printf("[daemon] smb start: %v", err)
+		} else {
+			d.smbMgr = mgr
+			log.Println("[daemon] Samba started after role upgrade to storage")
+		}
+	}
+
+	// Rewrite tunnels.conf and signal i2pd to reload.
 	if err := d.rebuildTunnels(); err != nil {
 		log.Printf("[daemon] tunnel rebuild: %v", err)
 	}
-	time.Sleep(3 * time.Second)
-	if err := d.mountNewPeers(); err != nil {
-		log.Printf("[daemon] peer mount: %v", err)
-	}
-	if err := d.rebuildMergerfs(); err != nil {
-		log.Printf("[daemon] mergerfs rebuild: %v", err)
-	}
+
+	// Mount new peers and rebuild mergerfs in the background.
+	// I2P needs time to negotiate tunnels after the reload signal, so we
+	// wait before attempting CIFS mounts.
+	go func() {
+		log.Printf("[daemon] waiting %s for I2P tunnels to establish...", tunnelEstablishWait)
+		time.Sleep(tunnelEstablishWait)
+		if err := d.mountNewPeers(); err != nil {
+			log.Printf("[daemon] peer mount: %v", err)
+		}
+		if err := d.rebuildMergerfs(); err != nil {
+			log.Printf("[daemon] mergerfs rebuild: %v", err)
+		}
+	}()
 }
 
 func (d *Daemon) watchdog() {
@@ -355,14 +405,53 @@ func (d *Daemon) rebuildTunnels() error {
 	return d.i2pMgr.ReloadTunnels(smbPort, tPeers)
 }
 
+// isMounted reports whether path appears in /proc/mounts as an active mount.
+func isMounted(path string) bool {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
+	}
+	// Each line: device mountpoint fstype options dump pass
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == path {
+			return true
+		}
+	}
+	return false
+}
+
+// mountNewPeers mounts any peer whose mount path is not currently active.
+// Each mount is retried up to mountRetries times with mountRetryDelay between
+// attempts, because I2P tunnels may still be negotiating.
 func (d *Daemon) mountNewPeers() error {
 	for _, p := range d.reg.Peers() {
 		mountPath := peerMountBase + "/" + p.Phrase[0] + "-" + p.Phrase[1] + "-" + p.Phrase[2]
-		if _, err := os.Stat(mountPath); err == nil {
+
+		if isMounted(mountPath) {
 			continue
 		}
-		if _, err := mergerfs.MountPeer(p, peerMountBase, d.cfg.SambaUser, d.cfg.SambaPass); err != nil {
-			log.Printf("[daemon] mount peer %q: %v", p.Identity(), err)
+
+		var lastErr error
+		for attempt := 1; attempt <= mountRetries; attempt++ {
+			if attempt > 1 {
+				log.Printf("[daemon] mount peer %q: retry %d/%d in %s",
+					p.Identity(), attempt, mountRetries, mountRetryDelay)
+				time.Sleep(mountRetryDelay)
+			}
+			if _, err := mergerfs.MountPeer(p, peerMountBase, d.cfg.SambaUser, d.cfg.SambaPass); err != nil {
+				lastErr = err
+				log.Printf("[daemon] mount peer %q (attempt %d/%d): %v",
+					p.Identity(), attempt, mountRetries, err)
+				continue
+			}
+			lastErr = nil
+			log.Printf("[daemon] mounted peer %q at %s", p.Identity(), mountPath)
+			break
+		}
+		if lastErr != nil {
+			log.Printf("[daemon] mount peer %q failed after %d attempts: %v",
+				p.Identity(), mountRetries, lastErr)
 		}
 	}
 	return nil
@@ -372,9 +461,15 @@ func (d *Daemon) rebuildMergerfs() error {
 	peers := d.reg.StoragePeers()
 	mounts := make([]*mergerfs.PeerMount, 0, len(peers))
 	for _, p := range peers {
+		mountPath := peerMountBase + "/" + p.Phrase[0] + "-" + p.Phrase[1] + "-" + p.Phrase[2]
+		// Only include peers whose CIFS mount is actually active.
+		if !isMounted(mountPath) {
+			log.Printf("[daemon] skipping peer %q in mergerfs — not yet mounted", p.Identity())
+			continue
+		}
 		mounts = append(mounts, &mergerfs.PeerMount{
 			B32:       p.B32,
-			MountPath: peerMountBase + "/" + p.Phrase[0] + "-" + p.Phrase[1] + "-" + p.Phrase[2],
+			MountPath: mountPath,
 			Storage:   true,
 		})
 	}
@@ -408,6 +503,9 @@ func (d *Daemon) UpdateSelf(quotaBytes int64, storagePath string) error {
 	}
 	// If we are now a storage node and the smb manager isn't running, start it.
 	if self.Role == registry.RoleStorage && d.smbMgr == nil && self.StoragePath != "" {
+		if err := os.MkdirAll(self.StoragePath, 0o750); err != nil {
+			return fmt.Errorf("daemon: mkdir storage: %w", err)
+		}
 		var err error
 		d.smbMgr, err = smb.New(smb.Config{
 			StoragePath: self.StoragePath,

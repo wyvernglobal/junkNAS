@@ -99,64 +99,52 @@ func New(_ string, serverPort int, apiPort int) (*Manager, error) {
 	return m, nil
 }
 
-// Start launches i2pd using its default system configuration from
-// /var/lib/i2pd.  No custom --conf, --logfile, or --loglevel flags are
-// passed — i2pd picks those up from its own i2pd.conf as installed.
-//
-// After i2pd starts we wait for the keyfiles to appear and cache the
-// resulting B32 addresses.
-// manager.go
-
+// Start ensures our tunnel stanzas are in tunnels.conf and waits for keyfiles.
 func (m *Manager) Start() error {
-    // Don't spawn i2pd — it's a system service. Just ensure our tunnel
-    // stanzas are in tunnels.conf and reload the running daemon.
-    if err := m.ensureServerTunnels(m.smbPort, m.apiPort); err != nil {
-        return err
-    }
-  //  if err := m.reloadSystemI2PD(); err != nil {
-        // Non-fatal: maybe it's not a systemd service, log and continue.
-  //      fmt.Fprintf(os.Stderr, "[i2p] warn: could not signal system i2pd: %v\n", err)
- //   }
+	if err := m.ensureServerTunnels(m.smbPort, m.apiPort); err != nil {
+		return err
+	}
 
-    // Wait for the keyfiles — i2pd generates them after processing tunnels.conf.
-    apiKeyFile := filepath.Join(i2pdDataDir, "api-server.dat")
-    apiB32, err := pollB32(apiKeyFile, 120*time.Second)
-    if err != nil {
-        fmt.Fprintf(os.Stderr, "[i2p] API B32 not yet available: %v\n", err)
-        return nil // retryB32 goroutine will keep trying
-    }
-    m.apiB32 = apiB32
-    fmt.Fprintf(os.Stderr, "[i2p] API B32: %s\n", m.apiB32)
+	// Wait for the keyfiles — i2pd generates them after processing tunnels.conf.
+	apiKeyFile := filepath.Join(i2pdDataDir, "api-server.dat")
+	apiB32, err := pollB32(apiKeyFile, 120*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[i2p] API B32 not yet available: %v\n", err)
+		return nil // retryB32 goroutine will keep trying
+	}
+	m.apiB32 = apiB32
+	fmt.Fprintf(os.Stderr, "[i2p] API B32: %s\n", m.apiB32)
 
-    smbKeyFile := filepath.Join(i2pdDataDir, "smb-server.dat")
-    if smbB32, err := b32FromKeyFile(smbKeyFile); err == nil {
-        m.smbB32 = smbB32
-        fmt.Fprintf(os.Stderr, "[i2p] SMB B32: %s\n", m.smbB32)
-    }
-    return nil
+	smbKeyFile := filepath.Join(i2pdDataDir, "smb-server.dat")
+	if smbB32, err := b32FromKeyFile(smbKeyFile); err == nil {
+		m.smbB32 = smbB32
+		fmt.Fprintf(os.Stderr, "[i2p] SMB B32: %s\n", m.smbB32)
+	}
+	return nil
 }
 
 func (m *Manager) Stop() {
-    // We don't own i2pd — don't kill it.
-    // Optionally remove our peer tunnel stanzas and reload.
-    _ = m.rewritePeerTunnels(nil)
-    _ = m.reloadSystemI2PD()
+	// We don't own i2pd — don't kill it.
+	// Remove our peer tunnel stanzas and reload so we leave the config clean.
+	_ = m.rewritePeerTunnels(nil)
+	_ = m.reloadSystemI2PD()
 }
 
+// reloadSystemI2PD signals i2pd to reload tunnels.conf.
+// SIGHUP is preferred — it reloads config without dropping existing connections
+// or rebinding ports.  systemctl reload/restart are fallbacks.
 func (m *Manager) reloadSystemI2PD() error {
-    // Use systemctl to restart i2pd, this is hacky as all hell, i hate hate hate it
-    // but if I do it via ANY other proccess like SIGHUP or only
-    // do 1 pkill it drops the bind to the Go server port.
-    cmd := exec.Command("sudo", "pkill", "i2pd", "&&", "sudo", "pkill", "i2pd", "&&", "sudo", "systemctl", "restart", "i2pd")
-    out, err := cmd.CombinedOutput()
-    if err != nil {
-        return fmt.Errorf("systemctl restart i2pd: %w — %s", err, out)
-    }
-    fmt.Fprintf(os.Stderr, "[i2p] restarted system i2pd via systemctl\n")
-    return nil
+	// Fallback: systemctl reload (graceful), then restart as last resort.
+	if out, err := exec.Command("sudo", "systemctl", "reload", "i2pd").CombinedOutput(); err != nil {
+		if out2, err2 := exec.Command("sudo", "systemctl", "restart", "i2pd").CombinedOutput(); err2 != nil {
+			return fmt.Errorf("reload i2pd: reload: %w (%s) restart: %v (%s)", err, out, err2, out2)
+		}
+		fmt.Fprintf(os.Stderr, "[i2p] restarted i2pd via systemctl\n")
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[i2p] reloaded i2pd via systemctl\n")
+	return nil
 }
-
-
 
 // SMBAddress returns this node's SMB .b32.i2p address (from smb-server.dat),
 // or an empty string if the keyfile is not yet available.
@@ -196,14 +184,15 @@ func (m *Manager) B32Address() string {
 // The two JunkNAS server stanzas are re-ensured on every call so that a
 // manual edit that removed them is self-healed.
 func (m *Manager) ReloadTunnels(smbServerPort int, peers []TunnelPeer) error {
-    if err := m.ensureServerTunnels(smbServerPort, m.apiPort); err != nil {
-        return err
-    }
-    if err := m.rewritePeerTunnels(peers); err != nil {
-        return err
-    }
-    return nil//m.reloadSystemI2PD() // <-- was: m.cmd.Process.Signal(syscall.SIGHUP)
+	if err := m.ensureServerTunnels(smbServerPort, m.apiPort); err != nil {
+		return err
+	}
+	if err := m.rewritePeerTunnels(peers); err != nil {
+		return err
+	}
+	return m.reloadSystemI2PD()
 }
+
 // ── tunnel config helpers ─────────────────────────────────────────────────
 
 // ensureServerTunnels reads the existing tunnels.conf and appends the

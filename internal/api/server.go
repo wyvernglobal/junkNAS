@@ -2,8 +2,7 @@ package api
 
 import (
 	"encoding/json"
-
-
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -15,20 +14,20 @@ import (
 )
 
 type Server struct {
-	reg      *registry.Registry
-	proto    *join.Protocol
-	i2pMgr   *i2p.Manager
-	port     int
-	onJoin   func()
+	reg    *registry.Registry
+	proto  *join.Protocol
+	i2pMgr *i2p.Manager
+	port   int
+	onJoin func()
 }
 
 func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJoin func()) (*Server, error) {
 	return &Server{
-		reg:      reg,
-		proto:    proto,
-		i2pMgr:   i2pMgr,
-		port:     6767,
-		onJoin:   onJoin,
+		reg:    reg,
+		proto:  proto,
+		i2pMgr: i2pMgr,
+		port:   6767,
+		onJoin: onJoin,
 	}, nil
 }
 
@@ -47,14 +46,14 @@ func (s *Server) Serve() error {
 	mux.HandleFunc("GET /v1/invite", s.handleInvite)
 	mux.HandleFunc("POST /v1/connect", s.handleConnect)
 	mux.HandleFunc("GET /v1/peers", s.handlePeers)
-        mux.HandleFunc("GET /v1/test", s.handleTest)
+	mux.HandleFunc("GET /v1/test", s.handleTest)
 	srv := &http.Server{
-		Addr:	      ":6767",
+		Addr:         ":6767",
 		Handler:      mux,
 		ReadTimeout:  60 * time.Second,
 		WriteTimeout: 60 * time.Second,
-		}
-	srv.SetKeepAlivesEnabled(false)  
+	}
+	srv.SetKeepAlivesEnabled(false)
 	return srv.ListenAndServe()
 }
 
@@ -139,11 +138,11 @@ func (s *Server) handleInvite(w http.ResponseWriter, _ *http.Request) {
 }
 
 type ConnectRequest struct {
-	TargetB32    string        `json:"target_b32"`
-	Phrase       [3]string     `json:"phrase"`
-	Role         registry.Role `json:"role"`
-	QuotaBytes   int64         `json:"quota_bytes"`
-	StoragePath  string        `json:"storage_path"`
+	TargetB32   string        `json:"target_b32"`
+	Phrase      [3]string     `json:"phrase"`
+	Role        registry.Role `json:"role"`
+	QuotaBytes  int64         `json:"quota_bytes"`
+	StoragePath string        `json:"storage_path"`
 }
 
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +152,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ensure this node is ready to join (B32 addresses already known)
+	// Ensure this node is ready to join (B32 addresses already known).
 	self := s.reg.Self()
 	if self == nil {
 		http.Error(w, "self not initialized", http.StatusServiceUnavailable)
@@ -170,14 +169,23 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Synchronously perform the join request over I2P (may take tens of seconds)
+	// Create the storage directory now so it exists before SMB tries to use it.
+	if req.StoragePath != "" && req.Role == registry.RoleStorage {
+		if err := os.MkdirAll(req.StoragePath, 0o750); err != nil {
+			log.Printf("[api] mkdir storage %s: %v", req.StoragePath, err)
+			// Non-fatal: log but continue — SMB manager will also try.
+		}
+	}
+
+	// Synchronously perform the join request over I2P (may take tens of seconds).
 	resp, err := s.proto.SendJoinRequest(req.TargetB32, phrase, req.Role, req.QuotaBytes, req.StoragePath)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// After successful join, update our own self record with the chosen quota and storage path.
+	// After successful join, update our own self record with the chosen quota,
+	// storage path, and role.
 	updated := false
 	if req.QuotaBytes > 0 && self.QuotaBytes != req.QuotaBytes {
 		self.QuotaBytes = req.QuotaBytes
@@ -196,10 +204,13 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "join succeeded but failed to update local config: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		// If role changed to storage and we have a storage path, trigger daemon to start SMB.
-		if self.Role == registry.RoleStorage && self.StoragePath != "" && s.onJoin != nil {
-			s.onJoin()
-		}
+	}
+
+	// Always trigger a topology rebuild after a successful join — new peers
+	// were added to the registry and tunnels need to be established for them,
+	// regardless of whether our own role changed.
+	if s.onJoin != nil {
+		go s.onJoin()
 	}
 
 	// Return the peer list that the joining node received.
@@ -211,7 +222,6 @@ func (s *Server) handlePeers(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(s.reg.Peers())
 }
-
 
 func (s *Server) handleTest(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
