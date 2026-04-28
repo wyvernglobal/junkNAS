@@ -220,7 +220,6 @@ func (m *Manager) ensureServerTunnels(smbPort, apiPort int) error {
 	}
 	defer f.Close()
 	_, err = f.WriteString(buf.String())
-	exec.Command("sudo", "chown", "-R", "junknas:junknas", "/var/lib/i2pd").CombinedOutput();
 	return err
 }
 
