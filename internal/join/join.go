@@ -46,18 +46,18 @@ type AnnounceRequest struct {
 
 type Protocol struct {
 	reg        *registry.Registry
-	httpClient *http.Client
+	HttpClient *http.Client
 }
 
 func New(reg *registry.Registry) *Protocol {
 	return &Protocol{
 		reg:        reg,
-		httpClient: &http.Client{Timeout: 90 * time.Second},
+		HttpClient: &http.Client{Timeout: 90 * time.Second},
 	}
 }
 
 func (p *Protocol) SetHTTPClient(c *http.Client) {
-	p.httpClient = c
+	p.HttpClient = c
 }
 
 func (p *Protocol) GenerateInvite() (*Invitation, error) {
@@ -206,5 +206,5 @@ func (p *Protocol) postJSON(url string, payload any) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return p.httpClient.Do(req)
+	return p.HttpClient.Do(req)
 }

@@ -2,13 +2,11 @@ package tui
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -17,7 +15,10 @@ import (
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/junknas/junknas/internal/join"
+	"github.com/junknas/junknas/internal/daemon"
 	"github.com/rivo/tview"
+	"github.com/f1bonacc1/glippy"
+
 )
 
 // Colour palette
@@ -35,25 +36,10 @@ var (
 var httpClient = &http.Client{Timeout: 5 * time.Second}
 
 func copyToClipboard(text string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	tools := [][]string{
-		{"wl-copy"},
-		{"xclip", "-selection", "clipboard"},
-		{"xsel", "-b", "-i"},
+	if err := glippy.Set(text); err == nil {
+		return nil
 	}
-	for _, args := range tools {
-		path, err := exec.LookPath(args[0])
-		if err != nil {
-			continue
-		}
-		cmd := exec.CommandContext(ctx, path, args[1:]...)
-		cmd.Stdin = strings.NewReader(text)
-		if err := cmd.Run(); err == nil {
-			return nil
-		}
-	}
-	return fmt.Errorf("no clipboard tool found (install wl-copy, xclip, or xsel)")
+	return fmt.Errorf("Clipboard error")
 }
 
 type DiskInfo struct {
@@ -183,6 +169,7 @@ type App struct {
 	pages  *tview.Pages
 	base   string
 	status *statusResp
+	daemon	*daemon.Daemon
 
 	selfBox    *tview.TextView
 	statsBox   *tview.TextView
@@ -424,25 +411,10 @@ func (a *App) showAddNode() {
 
 	copyStatus := tview.NewTextView().SetDynamicColors(true).SetTextAlign(tview.AlignCenter)
 	copyStatus.SetBackgroundColor(colPanel)
-
+	
 	copyBtn := tview.NewButton("  [C] Copy B32 to clipboard  ").
 		SetSelectedFunc(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					a.tapp.QueueUpdateDraw(func() {
-						copyStatus.SetText(fmt.Sprintf("[%s]Panic: %v[-]", hex(colRed), r))
-					})
-				}
-			}()
-			if err := copyToClipboard(b32); err != nil {
-				a.tapp.QueueUpdateDraw(func() {
-					copyStatus.SetText(fmt.Sprintf("[%s]Copy failed: %s[-]", hex(colRed), err))
-				})
-			} else {
-				a.tapp.QueueUpdateDraw(func() {
-					copyStatus.SetText(fmt.Sprintf("[%s]Copied to clipboard![-]", hex(colGreen)))
-				})
-			}
+			copyToClipboard(fmt.Sprintf(b32))
 		})
 	copyBtn.SetBackgroundColor(colPanel)
 	copyBtn.SetLabelColor(colAccent)
@@ -827,7 +799,7 @@ func (a *App) showJoinProgress(targetB32 string, payload map[string]any) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		client := &http.Client{Timeout: 150 * time.Second}
+		client := a.daemon.Proto.HttpClient
 		resp, err := client.Do(req)
 		if err != nil {
 			appendLog(colRed, "Connection failed: %v", err)

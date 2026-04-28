@@ -32,11 +32,9 @@ done
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     warn "Missing: ${MISSING[*]}"
     echo ""
-    echo "  Install on Debian/Ubuntu:"
-    echo "    sudo apt install golang-go cmake i2pd samba samba-common-bin cifs-utils mergerfs fuse"
+    echo "  Installing Dependancies:"
+    sudo apt install golang-go cmake i2pd samba samba-common-bin cifs-utils mergerfs fuse
     echo ""
-    read -rp "Continue anyway? [y/N] " cont
-    [[ "$cont" =~ ^[Yy]$ ]] || exit 1
 fi
 
 # ── System user ───────────────────────────────────────────────────────────

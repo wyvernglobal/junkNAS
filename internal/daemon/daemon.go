@@ -53,7 +53,7 @@ type Daemon struct {
 	smbMgr   *smb.Manager
 	mergeMgr *mergerfs.Manager
 	apiSrv   *api.Server
-	proto    *join.Protocol
+	Proto    *join.Protocol
 	stopCh   chan struct{}
 }
 
@@ -99,7 +99,7 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: mergerfs: %w", err)
 	}
 
-	proto := join.New(reg)
+	Proto := join.New(reg)
 
 	d := &Daemon{
 		cfg:      cfg,
@@ -107,11 +107,11 @@ func New(cfg Config) (*Daemon, error) {
 		i2pMgr:   i2pMgr,
 		smbMgr:   smbMgr,
 		mergeMgr: mergeMgr,
-		proto:    proto,
+		Proto:    Proto,
 		stopCh:   make(chan struct{}),
 	}
 
-	apiSrv, err := api.New(reg, proto, i2pMgr, d.onTopologyChange)
+	apiSrv, err := api.New(reg, Proto, i2pMgr, d.onTopologyChange)
 	if err != nil {
 		return nil, fmt.Errorf("daemon: api: %w", err)
 	}
@@ -140,7 +140,7 @@ func (d *Daemon) Start() error {
 	}
 	log.Printf("[daemon] proxy ready on %s", d.i2pMgr.ProxAddr)
 
-	d.proto.SetHTTPClient(d.i2pMgr.NewHTTPClient())
+	d.Proto.SetHTTPClient(d.i2pMgr.NewHTTPClient())
 
 	apiB32 := d.i2pMgr.APIAddress()
 	smbB32 := d.i2pMgr.SMBAddress()
