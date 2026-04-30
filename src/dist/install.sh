@@ -15,7 +15,7 @@ error() { echo -e "\033[31m[ERR ]\033[0m  $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || error "Run as root: sudo bash install.sh"
 
 mkdir -p "$DATA_DIR"/{smb,storage,.i2pd}
-cp startup.sh /var/lib/junknas/
+cp ./startup.sh /var/lib/junknas/
 chmod +x /var/lib/junknas/startup.sh
 
 # ── Dependencies ──────────────────────────────────────────────────────────
@@ -133,11 +133,11 @@ if [[ -n "$APPARMOR_PROFILE" ]]; then
 
         ok "Rule added"
     fi
-    if [ "$(uname -m)" != "aarch64" ]; then
-    	info "Reloading AppArmor profile..."
-    	apparmor_parser -r "$APPARMOR_PROFILE"
-   	ok "AppArmor reloaded"
-    fi
+    #if [ "$(uname -m)" != "aarch64" ]; then
+    #	info "Reloading AppArmor profile..."
+   # 	apparmor_parser --subdomainfs -r "$APPARMOR_PROFILE"
+  # 	ok "AppArmor reloaded"
+   # fi
 else
     warn "No i2pd AppArmor profile found, skipping"
 fi
@@ -154,20 +154,22 @@ else
     echo "user_allow_other" >> /etc/fuse.conf
     ok "user_allow_other added"
 fi
+
+
 # ── Systemd ───────────────────────────────────────────────────────────────
-info "Installing systemd service..."
+#info "Installing systemd service..."
 
-cp "$BUILD_DIR/junknas.service" /etc/systemd/system/junknas.service
-chmod 644 /etc/systemd/system/junknas.service
-cp "$BUILD_DIR/i2pd.service" /etc/systemd/system/i2pd.service
-chmod 644 /etc/systemd/system/i2pd.service
+#cp "$BUILD_DIR/junknas.service" /etc/systemd/system/junknas.service
+#chmod 644 /etc/systemd/system/junknas.service
+#cp "$BUILD_DIR/i2pd.service" /etc/systemd/system/i2pd.service
+#chmod 644 /etc/systemd/system/i2pd.service
 
-systemctl daemon-reload
-systemctl enable junknas.service
-systemctl enable --now i2pd.service
-systemctl disable --now smbd
+#systemctl daemon-reload
+#systemctl enable junknas.service
+#systemctl enable --now i2pd.service
+#systemctl disable --now smbd
 
-ok "Service installed and enabled"
+#ok "Service installed and enabled"
 
 # ── Done ──────────────────────────────────────────────────────────────────
 echo ""
@@ -175,9 +177,6 @@ ok "═════════════════════════�
 ok " JunkNAS installed successfully!"
 ok "═══════════════════════════════════════════"
 echo ""
-echo "  Start:       systemctl start junknas"
-echo "  Stop:        systemctl stop junknas"
-echo "  Logs:        journalctl -u junknas -f"
 echo "  TUI:         junknasd --tui-only"
 echo "  Cloud mount: /mnt/junknas"
 echo ""

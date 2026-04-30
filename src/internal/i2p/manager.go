@@ -135,14 +135,16 @@ func (m *Manager) Stop() {
 // or rebinding ports.  systemctl reload/restart are fallbacks.
 func (m *Manager) reloadSystemI2PD() error {
 	// Fallback: systemctl reload (graceful), then restart as last resort.
-	if out, err := exec.Command("sudo", "systemctl", "reload", "i2pd").CombinedOutput(); err != nil {
-		if out2, err2 := exec.Command("sudo", "systemctl", "restart", "i2pd").CombinedOutput(); err2 != nil {
-			return fmt.Errorf("reload i2pd: reload: %w (%s) restart: %v (%s)", err, out, err2, out2)
-		}
-		fmt.Fprintf(os.Stderr, "[i2p] restarted i2pd via systemctl\n")
+
+	if out, err := exec.Command("sudo", "pkill", "i2pd").CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "[i2p] failed to restart\n", err, out)
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "[i2p] reloaded i2pd via systemctl\n")
+	if out, err := exec.Command("sudo", "i2pd", "--daemon", "--datadir=/var/lib/i2pd").CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "[i2p] failed to restart\n", err, out)
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[i2p] reloaded i2pd via pkill\n")
 	return nil
 }
 
