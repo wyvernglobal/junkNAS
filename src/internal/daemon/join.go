@@ -1,4 +1,4 @@
-package join
+package daemon
 
 import (
 	"bytes"
@@ -7,8 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/junknas/junknas/internal/registry"
-	"github.com/junknas/junknas/internal/words"
+	"junknas/internal/words"
 )
 
 const inviteTTL = 10 * time.Minute
@@ -20,45 +19,43 @@ type Invitation struct {
 }
 
 type JoinRequest struct {
-	Token       string        `json:"token"`
-	B32         string        `json:"b32"`
-	SMBB32      string        `json:"smb_b32"`
-	Phrase      [3]string     `json:"phrase"`
-	Role        registry.Role `json:"role"`
-	QuotaBytes  int64         `json:"quota_bytes"`
-	StoragePath string        `json:"storage_path"`
+	Token       string    `json:"token"`
+	B32         string    `json:"b32"`
+	SMBB32      string    `json:"smb_b32"`
+	Phrase      [3]string `json:"phrase"`
+	Role        Role      `json:"role"`
+	QuotaBytes  int64     `json:"quota_bytes"`
+	StoragePath string    `json:"storage_path"`
 }
 
 type JoinResponse struct {
-	Peers   []*registry.Peer `json:"peers"`
-	SelfB32 string           `json:"self_b32"`
+	Peers   []*Peer `json:"peers"`
+	SelfB32 string  `json:"self_b32"`
 }
 
 type AnnounceRequest struct {
-	B32         string        `json:"b32"`
-	SMBB32      string        `json:"smb_b32"`
-	Phrase      [3]string     `json:"phrase"`
-	PhraseHash  string        `json:"phrase_hash"`
-	Role        registry.Role `json:"role"`
-	QuotaBytes  int64         `json:"quota_bytes"`
-	StoragePath string        `json:"storage_path"`
+	B32         string    `json:"b32"`
+	SMBB32      string    `json:"smb_b32"`
+	Phrase      [3]string `json:"phrase"`
+	PhraseHash  string    `json:"phrase_hash"`
+	Role        Role      `json:"role"`
+	QuotaBytes  int64     `json:"quota_bytes"`
+	StoragePath string    `json:"storage_path"`
 }
 
 type Protocol struct {
-	reg        *registry.Registry
+	reg        *Registry
 	HttpClient *http.Client
 }
 
-func New(reg *registry.Registry) *Protocol {
+func NewProtocol(reg *Registry) *Protocol {
 	return &Protocol{
 		reg:        reg,
 		HttpClient: &http.Client{Timeout: 90 * time.Second},
 	}
 }
 
-func (p *Protocol) SetHTTPClient(c *http.Client) {
-	p.HttpClient = c
-}
+func (p *Protocol) SetHTTPClient(c *http.Client) { p.HttpClient = c }
 
 func (p *Protocol) GenerateInvite() (*Invitation, error) {
 	phrase, err := words.Generate()
@@ -66,7 +63,7 @@ func (p *Protocol) GenerateInvite() (*Invitation, error) {
 		return nil, fmt.Errorf("join: generate phrase: %w", err)
 	}
 	hash := phrase.Hash()
-	if err := p.reg.AddInvite(registry.PendingInvite{
+	if err := p.reg.AddInvite(PendingInvite{
 		PhraseHash: hash,
 		ExpiresAt:  time.Now().Add(inviteTTL),
 	}); err != nil {
@@ -84,7 +81,7 @@ func (p *Protocol) HandleJoin(req *JoinRequest) (*JoinResponse, error) {
 	if !p.reg.ConsumeInvite(req.Token) {
 		return nil, fmt.Errorf("join: invalid or expired token")
 	}
-	newPeer := &registry.Peer{
+	newPeer := &Peer{
 		B32:         req.B32,
 		SMBB32:      req.SMBB32,
 		Phrase:      req.Phrase,
@@ -92,7 +89,7 @@ func (p *Protocol) HandleJoin(req *JoinRequest) (*JoinResponse, error) {
 		Role:        req.Role,
 		QuotaBytes:  req.QuotaBytes,
 		StoragePath: req.StoragePath,
-		Status:      registry.StatusPending,
+		Status:      StatusPending,
 	}
 	if err := p.reg.AddPeer(newPeer); err != nil {
 		return nil, fmt.Errorf("join: register peer: %w", err)
@@ -116,10 +113,10 @@ func (p *Protocol) HandleJoin(req *JoinRequest) (*JoinResponse, error) {
 
 func (p *Protocol) HandleAnnounce(req *AnnounceRequest) error {
 	if p.reg.HasPeer(req.B32) {
-		_ = p.reg.UpdatePeerStatus(req.B32, registry.StatusPending)
+		_ = p.reg.UpdatePeerStatus(req.B32, StatusPending)
 		return nil
 	}
-	return p.reg.AddPeer(&registry.Peer{
+	return p.reg.AddPeer(&Peer{
 		B32:         req.B32,
 		SMBB32:      req.SMBB32,
 		Phrase:      req.Phrase,
@@ -127,19 +124,18 @@ func (p *Protocol) HandleAnnounce(req *AnnounceRequest) error {
 		Role:        req.Role,
 		QuotaBytes:  req.QuotaBytes,
 		StoragePath: req.StoragePath,
-		Status:      registry.StatusPending,
+		Status:      StatusPending,
 	})
 }
 
 func (p *Protocol) SendJoinRequest(
 	targetAPIB32 string,
 	phrase words.Phrase,
-	role registry.Role,
+	role Role,
 	quotaBytes int64,
 	storagePath string,
 ) (*JoinResponse, error) {
 	self := p.reg.Self()
-	// Use the actual B32 from the registry (should be non‑pending by now)
 	apiB32 := self.B32
 	smbB32 := self.SMBB32
 	if apiB32 == "" || apiB32 == "pending" {
@@ -174,7 +170,6 @@ func (p *Protocol) SendJoinRequest(
 		return nil, fmt.Errorf("join: decode response: %w", err)
 	}
 
-	// Register every received peer except ourselves (keyed by API B32)
 	for _, peer := range jr.Peers {
 		if peer.B32 != apiB32 {
 			_ = p.reg.AddPeer(peer)

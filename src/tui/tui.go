@@ -14,8 +14,7 @@ import (
 	"time"
 
 	"github.com/gdamore/tcell/v2"
-	"github.com/junknas/junknas/internal/join"
-	"github.com/junknas/junknas/internal/daemon"
+	"junknas/internal/daemon"
 	"github.com/rivo/tview"
 	"github.com/f1bonacc1/glippy"
 
@@ -799,7 +798,7 @@ func (a *App) showJoinProgress(targetB32 string, payload map[string]any) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 
-		client := a.daemon.Proto.HttpClient
+		client := httpClient
 		resp, err := client.Do(req)
 		if err != nil {
 			appendLog(colRed, "Connection failed: %v", err)
@@ -820,7 +819,7 @@ func (a *App) showJoinProgress(targetB32 string, payload map[string]any) {
 			return
 		}
 
-		var jr join.JoinResponse
+		var jr daemon.JoinResponse
 		if err := json.NewDecoder(resp.Body).Decode(&jr); err != nil {
 			appendLog(colRed, "Invalid response: %v", err)
 			setStatus(colRed, "Join failed: malformed response")

@@ -1,4 +1,4 @@
-package registry
+package daemon
 
 import (
 	"encoding/json"
@@ -12,27 +12,24 @@ import (
 const (
 	InviteTTL      = 10 * time.Minute
 	registryFile   = "registry.json"
-	mountPortStart = 10445 // first local port used for peer SMB tunnels
+	mountPortStart = 10445
 )
 
-// store is the serialised form written to disk.
 type store struct {
 	Self           *Self           `json:"self"`
 	Peers          []*Peer         `json:"peers"`
 	PendingInvites []PendingInvite `json:"pending_invites"`
 }
 
-// Registry is the in-memory node registry with JSON persistence.
 type Registry struct {
 	mu             sync.RWMutex
 	self           *Self
-	peers          map[string]*Peer // keyed by b32
+	peers          map[string]*Peer
 	pendingInvites []PendingInvite
 	dataDir        string
 }
 
-// New creates (or loads) the registry rooted at dataDir.
-func New(dataDir string) (*Registry, error) {
+func NewRegistry(dataDir string) (*Registry, error) {
 	r := &Registry{
 		peers:   make(map[string]*Peer),
 		dataDir: dataDir,
@@ -46,7 +43,6 @@ func New(dataDir string) (*Registry, error) {
 	return r, nil
 }
 
-// SetSelf persists the node's own identity.
 func (r *Registry) SetSelf(s *Self) error {
 	r.mu.Lock()
 	r.self = s
@@ -54,14 +50,12 @@ func (r *Registry) SetSelf(s *Self) error {
 	return r.save()
 }
 
-// Self returns this node's identity (nil before first SetSelf).
 func (r *Registry) Self() *Self {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.self
 }
 
-// AddPeer adds or updates a peer and persists.
 func (r *Registry) AddPeer(p *Peer) error {
 	r.mu.Lock()
 	if _, exists := r.peers[p.B32]; !exists {
@@ -73,7 +67,6 @@ func (r *Registry) AddPeer(p *Peer) error {
 	return r.save()
 }
 
-// RemovePeer removes a peer by b32 address.
 func (r *Registry) RemovePeer(b32 string) error {
 	r.mu.Lock()
 	delete(r.peers, b32)
@@ -81,14 +74,12 @@ func (r *Registry) RemovePeer(b32 string) error {
 	return r.save()
 }
 
-// Peer returns a single peer or nil.
 func (r *Registry) Peer(b32 string) *Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.peers[b32]
 }
 
-// Peers returns a snapshot of all known peers.
 func (r *Registry) Peers() []*Peer {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -99,7 +90,6 @@ func (r *Registry) Peers() []*Peer {
 	return out
 }
 
-// StoragePeers returns only peers that store files (excludes leeches).
 func (r *Registry) StoragePeers() []*Peer {
 	all := r.Peers()
 	var out []*Peer
@@ -111,7 +101,6 @@ func (r *Registry) StoragePeers() []*Peer {
 	return out
 }
 
-// UpdatePeerStatus records last-seen and status for a peer.
 func (r *Registry) UpdatePeerStatus(b32 string, status Status) error {
 	r.mu.Lock()
 	if p, ok := r.peers[b32]; ok {
@@ -124,7 +113,6 @@ func (r *Registry) UpdatePeerStatus(b32 string, status Status) error {
 	return r.save()
 }
 
-// AddInvite stores a pending join invitation.
 func (r *Registry) AddInvite(inv PendingInvite) error {
 	r.mu.Lock()
 	r.pruneInvites()
@@ -133,8 +121,6 @@ func (r *Registry) AddInvite(inv PendingInvite) error {
 	return r.save()
 }
 
-// ConsumeInvite validates and removes a pending invite by phraseHash.
-// Returns false if the invite is not found or is expired.
 func (r *Registry) ConsumeInvite(phraseHash string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -149,15 +135,12 @@ func (r *Registry) ConsumeInvite(phraseHash string) bool {
 	return false
 }
 
-// HasPeer returns true if a peer with the given b32 exists.
 func (r *Registry) HasPeer(b32 string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	_, ok := r.peers[b32]
 	return ok
 }
-
-// --- persistence ---------------------------------------------------------
 
 func (r *Registry) load() error {
 	path := filepath.Join(r.dataDir, registryFile)
@@ -205,7 +188,6 @@ func (r *Registry) saveUnlocked() error {
 	return os.Rename(tmp, path)
 }
 
-// pruneInvites removes expired invites (caller must hold mu.Lock).
 func (r *Registry) pruneInvites() {
 	var active []PendingInvite
 	for _, inv := range r.pendingInvites {
@@ -216,8 +198,6 @@ func (r *Registry) pruneInvites() {
 	r.pendingInvites = active
 }
 
-// nextMountPort returns the next available localhost port for a peer SMB mount.
-// Caller must hold mu.Lock.
 func (r *Registry) nextMountPort() int {
 	used := make(map[int]bool)
 	for _, p := range r.peers {

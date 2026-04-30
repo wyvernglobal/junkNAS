@@ -1,4 +1,4 @@
-module github.com/junknas/junknas
+module junknas
 
 go 1.22
 

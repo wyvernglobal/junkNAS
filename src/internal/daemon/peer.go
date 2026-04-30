@@ -1,4 +1,4 @@
-package registry
+package daemon
 
 import "time"
 
@@ -48,8 +48,10 @@ func (p *Peer) Identity() string {
 	return p.Phrase[0] + " " + p.Phrase[1] + " " + p.Phrase[2]
 }
 
-func (p *Peer) IsStorage() bool {
-	return p.Role == RoleStorage
+func (p *Peer) IsStorage() bool { return p.Role == RoleStorage }
+
+func (p *Peer) DirName() string {
+	return p.Phrase[0] + "-" + p.Phrase[1] + "-" + p.Phrase[2]
 }
 
 type PendingInvite struct {
