@@ -2,6 +2,8 @@ module junknas
 
 go 1.22
 
+replace github.com/junknas/junknas => ./
+
 require (
 	github.com/f1bonacc1/glippy v1.2.0
 	github.com/gdamore/tcell/v2 v2.7.4

@@ -18,8 +18,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/junknas/junknas/internal/daemon"
-	"github.com/junknas/junknas/tui"
+	"junknas/internal/daemon"
+	"junknas/tui"
 )
 
 // Version is injected at build time via -ldflags.

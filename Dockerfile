@@ -21,4 +21,6 @@ RUN mkdir -p /etc/junknas && touch /etc/junknas/smb.secret
 WORKDIR /junknas/dist
 RUN /junknas/dist/install.sh
 
+RUN apt-get -y purge cmake build-essential
+
 ENTRYPOINT ["/junknas/dist/startup.sh"]

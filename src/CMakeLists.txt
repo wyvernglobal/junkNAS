@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(JunkNAS VERSION 0.1.0)
+project(JunkNAS VERSION 1.1.0)
 
 # ── Options ────────────────────────────────────────────────────────────────
 option(BUILD_GUI    "Build the Qt6 GUI frontend"  ON)

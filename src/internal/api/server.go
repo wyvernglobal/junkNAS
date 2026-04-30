@@ -7,21 +7,20 @@ import (
 	"os"
 	"time"
 
-	"github.com/junknas/junknas/internal/i2p"
-	"github.com/junknas/junknas/internal/join"
-	"github.com/junknas/junknas/internal/registry"
-	"github.com/junknas/junknas/internal/words"
+	"junknas/internal/i2p"
+	"junknas/internal/daemon"
+	"junknas/internal/words"
 )
 
 type Server struct {
-	reg    *registry.Registry
-	proto  *join.Protocol
+	reg    *daemon.Registry
+	proto  *daemon.Protocol
 	i2pMgr *i2p.Manager
 	port   int
 	onJoin func()
 }
 
-func New(reg *registry.Registry, proto *join.Protocol, i2pMgr *i2p.Manager, onJoin func()) (*Server, error) {
+func New(reg *registry.Registry, proto *daemon.Protocol, i2pMgr *i2p.Manager, onJoin func()) (*Server, error) {
 	return &Server{
 		reg:    reg,
 		proto:  proto,
